@@ -1,0 +1,453 @@
+---
+title: "post_training"
+output: html_document
+---
+
+```{r}
+require(dplyr)
+require(reshape2)
+source("code/fns.R")
+require(matrixStats)
+# long_durations <- data.frame(species_id = c(12, 2, 20, 22, 23, 23.4, 6, 7, 8, 9), name = "bad")
+
+data_key <- list.files("output/processed_data_set4/", pattern="key", full.names = TRUE)
+data_key <- do.call(rbind, lapply(1:length(data_key), function(x) readRDS(data_key[x])))
+
+durations <- data_key %>%
+  mutate(duration = round(duration, digits=3)) %>%
+  group_by(species_id, multiplier) %>%
+  summarise(duration = max(duration)) %>%
+  mutate(species_id = as.character(species_id))
+
+train_key <- list.files("output/trained_models_set5/", pattern="res", full.names=TRUE)
+train_key <- do.call(rbind, lapply(1:length(train_key), function(x) readRDS(train_key[x])))
+
+train_key$ver <- do.call(rbind, strsplit(train_key$results_name,"_"))[,4]
+
+quick_check <- train_key %>%
+  # filter(ver == "V1") %>%
+  filter(species_id %in% c(12, 13, 14, 15)) %>%
+  mutate(total_test = test_positive + test_negatve) %>%
+  mutate(wrong1 = (total_test-1)/total_test) %>%
+  mutate(wrong2 = (total_test-2)/total_test) %>%
+  mutate(wrong3 = (total_test-3)/total_test) %>%
+  mutate(wrong4 = (total_test-4)/total_test) %>%
+  # mutate(over98 = test_accuracy >= 0.979,
+  #        over96 = test_accuracy < 0.979 & test_accuracy >= 0.959) %>%
+  group_by(ver, file_name, wrong1, wrong2, wrong3, wrong4, species_id) %>%
+  summarise(max_acc = round(max(test_accuracy), digits=2),
+            mean_acc = round(mean(test_accuracy), digits=2),
+            n_at_wrong1 = length(which(test_accuracy >= wrong1 - 0.001)),
+            n_at_wrong2 = length(which(test_accuracy >= wrong2 - 0.001 & test_accuracy < wrong1 - 0.001)),
+            n_at_wrong3 = length(which(test_accuracy >= wrong3 - 0.001 & test_accuracy < wrong2 - 0.001)),
+            # n_at_wrong3 = length(which(test_accuracy >= wrong4 - 0.001 & test_accuracy < wrong3 - 0.001)),
+            max_iter = max(iter), .groups = 'drop')
+
+top_res <- train_key %>%
+  filter(ver != "V1") %>%
+  group_by(species_id) %>%
+  # select(-dim_x, -dim_y) %>%
+  arrange(-test_accuracy) %>%
+  slice_max(test_accuracy, n=1) %>%
+  slice_min(test_loss, n=1) %>%
+  left_join(., durations, by = "species_id") %>%
+  mutate(multiplier = ifelse(species_id == 13.4, 2.5, multiplier))  %>%
+  mutate(multiplier = ifelse(species_id == 5.4, 3, multiplier))
+
+top_res <- top_res %>%
+  filter(!(species_id %in% c("13.4", "5.4", "20.4")))
+
+
+```
+
+
+```{r}
+
+test_reader <- function(test_file_wav, window_multiplier=2){
+  
+  tmp <- specmaker(test_file_wav, low_f = 50, high_f = 8500, window_multiplier = window_multiplier)  %>%
+      group_by(FreqHz) %>%
+      mutate(value = value - mean(value)) %>%
+      ungroup() %>%
+      mutate(value = (value - min(value)) / (max(value) - min(value))) %>%
+      mutate(zts = seqt - min(seqt) + 1) %>%
+      ungroup() %>%
+      group_by(zts) %>%
+      mutate(value = value - mean(value)) %>%
+      ungroup()  %>%
+      mutate(value = scale(value, center=TRUE)) %>%
+      mutate(value = ifelse(value < 0, 0, value)) 
+  return(tmp)}
+
+test_keras_prepper <- function(tmp, train_dim){
+
+  train_dim <- unlist(train_dim)
+  y_dim <- train_dim[3]
+  x_dim <- train_dim[2]
+  
+  frames <-  data.frame(zts = unique(tmp$zts), 
+                           breaks1 = cut(unique(tmp$zts), include.lowest=TRUE, breaks=seq(0, max(unique(tmp$zts)), y_dim-1)), 
+                           breaks2 = cut(unique(tmp$zts), include.lowest=TRUE, breaks=seq(floor(y_dim*0.25), floor(y_dim*0.25)+ max(unique(tmp$zts)), y_dim-1)), 
+                           breaks3 = cut(unique(tmp$zts), include.lowest=TRUE, breaks=seq(floor(y_dim*0.5), floor(y_dim*0.5)+ max(unique(tmp$zts)), y_dim-1)), 
+                           breaks4 = cut(unique(tmp$zts), include.lowest=TRUE, breaks=seq(floor(y_dim*0.75), floor(y_dim*0.75)+ max(unique(tmp$zts)), y_dim-1))) %>%
+   mutate_all(., function(x) ifelse(is.na(x), 0, as.character(x))) %>%
+   melt(., id.vars=c("zts")) %>%
+   filter(value != 0) %>%
+   mutate(frame_id = paste0(variable, "_", value)) %>%
+   select(-variable, -value) %>%
+   mutate(zts = as.numeric(as.character(zts)))
+  
+  tmp_z <- tmp %>%
+    left_join(frames, ., by ="zts") %>%
+    group_by(frame_id, FreqHz) %>%
+    mutate(zts2 = 1:n()) %>%
+    ungroup() %>%
+    mutate(frame_id = paste0(zts, "_", frame_id)) %>%
+    mutate(zts = as.numeric(as.character(zts2)))
+  
+  freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), 
+                         FreqBin1 = cut(unique(tmp$FreqHz), 4, labels = c(1,1,2,2)),
+                         FreqBin2 = cut(unique(tmp$FreqHz), 4, labels = c(0,3,3,0)))
+  
+  f1 <- tmp_z %>%
+    dplyr::select(frame_id, zts, value, FreqHz) %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin1 == 1) %>%
+    dcast(frame_id + zts ~ FreqHz) 
+  
+  f2 <- tmp_z %>%
+    dplyr::select(frame_id, zts, value, FreqHz) %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin1 == 2) %>%
+    dcast(frame_id + zts ~ FreqHz) 
+  
+  f3 <- tmp_z %>%
+    dplyr::select(frame_id, zts, value, FreqHz) %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin2 == 3) %>%
+    dcast(frame_id + zts ~ FreqHz) 
+  
+  lister <- function(x){
+    list(f1 %>% filter(zts == times[x])%>%select(-frame_id, -zts) %>% as.matrix(),
+         f2 %>% filter(zts == times[x])%>%select(-frame_id, -zts) %>% as.matrix(),
+         f3 %>% filter(zts == times[x])%>%select(-frame_id, -zts) %>% as.matrix())
+  }
+    
+  times <- unique(tmp_z$zts)
+  train <- lapply(1:length(times), function(x) lister(x))
+  output_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+  # output_x_lab <- f1 %>% filter(zts == 1) %>% select(frame_id)
+  
+  if(all(dim(output_x)[-1] != unlist(train_dim)[-1])){print("dimensions don't match")}
+  return(list(output_x))
+}
+
+
+
+test_keras_prepper_v2 <- function(tmp, train_dim){
+
+   train_dim <- unlist(train_dim)
+   y_dim <- train_dim[3]
+
+   frames <-  data.frame(zts = as.numeric(as.character(unique(tmp$zts))), 
+                           breaks1 = cut(unique(tmp$zts), include.lowest=TRUE, breaks=seq(0, max(unique(tmp$zts)), y_dim-1)), 
+                           breaks2 = cut(unique(tmp$zts), include.lowest=TRUE, breaks=seq(floor(y_dim*0.5), floor(y_dim*0.5)+ max(unique(tmp$zts)), y_dim-1))) %>%
+   mutate_all(., function(x) ifelse(is.na(x), 0, as.character(x))) %>%
+   melt(., id.vars=c("zts")) %>%
+   filter(value != 0) %>%
+   mutate(frame_id = paste0(variable, "_", value)) %>%
+   select(-variable, -value) %>%
+   mutate(zts = as.numeric(as.character(zts)))
+   
+  tmp_z <- tmp %>%
+    left_join(frames, ., by ="zts") %>%
+    group_by(frame_id, FreqHz) %>%
+    mutate(zts2 = 1:n()) %>%
+    ungroup() %>%
+    # mutate(frame_id = paste0(zts, frame_id)) %>%
+    mutate(zts = as.numeric(as.character(zts2)))
+  
+  freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), 
+                         FreqBin1 = cut(unique(tmp$FreqHz), 4, labels = c(1,1,2,2)),
+                         FreqBin2 = cut(unique(tmp$FreqHz), 4, labels = c(0,3,3,0)))
+  
+  f1 <- tmp_z %>%
+    select(frame_id, zts, value, FreqHz) %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin1 == 1) %>%
+    dcast(frame_id + zts ~ FreqHz) 
+  
+  f2 <- tmp_z %>%
+    select(frame_id, zts, value, FreqHz) %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin1 == 2) %>%
+    dcast(frame_id + zts ~ FreqHz) 
+  
+  f3 <- tmp_z %>%
+    select(frame_id, zts, value, FreqHz) %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin2 == 3) %>%
+    dcast(frame_id + zts ~ FreqHz) 
+  
+  lister <- function(x){
+    list(f1 %>% filter(zts == times[x])%>%select(-frame_id, -zts) %>% as.matrix(),
+         f2 %>% filter(zts == times[x])%>%select(-frame_id, -zts) %>% as.matrix(),
+         f3 %>% filter(zts == times[x])%>%select(-frame_id, -zts) %>% as.matrix())
+  }
+    
+  times <- unique(tmp_z$zts)
+  train <- lapply(1:length(times), function(x) lister(x))
+  output_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+
+  if(all(dim(output_x)[-1] != unlist(train_dim)[-1])){print("dimensions don't match")}
+  return(list(output_x))
+}
+
+```
+
+```{r}
+test_files_full <- list.files("data/test_wav", pattern="wav", full.names = TRUE)
+test_files_full <- data.frame(recording_id = do.call(rbind, strsplit(test_files_full, "/|.wav"))[,4], file_id = test_files_full)
+
+test_files <- test_files_full[test_files_full$recording_id %in% sample(test_files_full$recording_id, 10),]
+test_files <- test_files_full[test_files_full$recording_id %in% "04e21ba1b",]
+
+export_list <- vector('list', length(test_files))
+
+for(i in 1:10){
+  print(paste0("working on ___ ", test_files[i,]$recording_id))
+  test_f25 <- test_reader(test_file_wav =  test_files[i,], window_multiplier = 2.5)
+  test_f3 <- test_reader(test_file_wav =  test_files[i,], window_multiplier = 3)
+  test_f4 <- test_reader(test_file_wav =  test_files[i,], window_multiplier = 4)
+
+  res_list <- vector('list', nrow(top_res))
+
+  for(j in 1:nrow(top_res)){
+      
+    print(top_res$species_id[j])
+    
+    if(top_res$multiplier[j] == 4){
+      test_x <- test_keras_prepper_v2(tmp =  test_f4, train_dim =  top_res$dim_x[j])
+      } else if(top_res$multiplier[j] == 3){
+      test_x <- test_keras_prepper_v2(tmp =  test_f3, train_dim =  top_res$dim_x[j])
+      } else if(top_res$multiplier[j] == 2.5){
+      test_x <- test_keras_prepper_v2(tmp =  test_f25, train_dim =  top_res$dim_x[j])
+      }
+    
+    res_list[[j]] <- cbind(test_files[i,], species_id = top_res$species_id[j], 
+                           value = keras::load_model_hdf5(top_res$results_name[j]) %>% 
+                             keras::predict_classes(test_x[[1]]), 
+                           row.names = NULL)
+  }
+
+   export_list[[i]]  <- do.call(rbind, res_list)
+   
+  }
+
+saveRDS(do.call(rbind, export_list), "predictions.RDS")
+```
+
+```{r}
+list_res <- list.files("results", full.names = TRUE)
+
+res <- do.call(rbind, lapply(1:length(list_res), function(x) readRDS(list_res[x]))) 
+res <- res %>%
+  mutate(parent_species = do.call(rbind, strsplit(res$species_id, "[.]"))[,1]) 
+
+res %>%
+  group_by(parent_species, recording_id, file_id) %>%
+  summarise(value = (mean(value))) %>%
+  mutate(parent_species = paste0("s", parent_species)) %>%
+  select(parent_species, recording_id, value) %>%
+  dcast(recording_id ~ parent_species)
+
+res %>%
+  group_by(parent_species, recording_id, file_id) %>%
+  summarise(value = (mean(value))) %>%
+  ggplot(aes(x=parent_species, y=value)) +
+  geom_boxplot()
+
+res %>%
+  group_by(parent_species, recording_id, file_id) %>%
+  mutate(frame = 1:n())
+  summarise(value = round(mean(value))) %>%
+  group_by(parent_species) %>%
+  summarise(n = length(which(value == 1)))
+
+```
+
+
+```{r}
+test_files_full <- list.files("data/test_wav", pattern="wav", full.names = TRUE)
+test_files_full <- data.frame(recording_id = do.call(rbind, strsplit(test_files_full, "/|.wav"))[,4], file_id = test_files_full)
+
+test <- specmaker(test_files_full[test_files_full$recording_id =="000316da7",], low_f = 50, high_f = 8500, window_multiplier=2.5)  %>%
+      group_by(FreqHz) %>%
+      mutate(value = value - mean(value)) %>%
+      ungroup() %>%
+      mutate(value = (value - min(value)) / (max(value) - min(value))) %>%
+      mutate(zts = seqt - min(seqt))
+
+test <- test %>%
+    group_by(zts) %>%
+    mutate(value = value - mean(value)) %>%
+    ungroup()  %>%
+    mutate(value = scale(value, center=TRUE)) %>%
+    mutate(value = ifelse(value < 0, 0, value))
+
+test %>% 
+  ggplot(aes(x = zts, y = FreqHz, col = value)) +
+  geom_tile() + 
+  ggtitle(test_files_full[test_files_full$recording_id =="000316da7",]) +
+  scale_color_gradient2(low = ("white"), mid = "white", high = ("red")) + theme_bw()
+
+```
+
+
+```{r}
+  tmp <- data  %>%
+    mutate(cat1 = ifelse(cate == "true_positive", 1, 0),
+           cat2 = ifelse(cate == "false_positive", 1, 0)) %>%
+    group_by(unique_id) %>%
+    mutate(zts = seqt - min(seqt)) %>%
+    ungroup() %>%
+    select(unique_id, cat1, cat2, FreqHz, value, zts)
+  
+  freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), 
+                         FreqBin1 = cut(unique(tmp$FreqHz), 4, labels = c(1,1,2,2)),
+                         FreqBin2 = cut(unique(tmp$FreqHz), 4, labels = c(0,3,3,0)))
+
+  
+  f1 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    dplyr::filter(FreqBin1 == 1) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  f2 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    dplyr::filter(FreqBin1 == 2) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz)
+  
+  f3 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    dplyr::filter(FreqBin2 == 3) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  lister <- function(x){
+    list(f1 %>% dplyr::filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f2 %>% dplyr::filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f3 %>% dplyr::filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix())
+  }
+  
+  times <- unique(tmp$zts)
+  train <- lapply(1:length(times), function(x) lister(x))
+  output_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+  output_x_lab <- f1 %>% dplyr::filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% keras::to_categorical() 
+
+
+
+```
+
+
+```{r}
+
+keras_prepper <- function(input_data){
+  tmp <- input_data  %>%
+    mutate(cat1 = ifelse(cate == "true_positive", 1, 0),
+           cat2 = ifelse(cate == "false_positive", 1, 0)) %>%
+    group_by(unique_id) %>%
+    mutate(zts = seqt - min(seqt)) %>%
+    ungroup() %>%
+    select(unique_id, cat1, cat2, FreqHz, value, zts)
+  
+  freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), FreqBin = cut(unique(tmp$FreqHz), 4, labels = c(1,2,3,4)))
+  
+  f1 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 1) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  f2 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 2) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz)
+  
+  
+  f3 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 3) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  f4 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 4) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  lister <- function(x){
+    list(f1 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f2 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f3 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f4 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix())
+  }
+  
+  times <- unique(tmp$zts)
+  train <- lapply(1:length(times), function(x) lister(x))
+  output_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+  output_x_lab <- f1 %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% keras::to_categorical() 
+  return(list(output_x, output_x_lab))
+}
+
+
+
+
+```
+
+
+
+```{r}
+tmp <- dat 
+tmp$total_accuracy <- 0
+tmp$total_loss <- 0
+tmp$diff <- abs(tmp$total_accuracy - tmp$test_accuracy)
+
+res_list <- vector('list', nrow(tmp))
+for(i in 1:nrow(tmp)){
+  model1 <- keras::load_model_hdf5(tmp$results_name[i])
+  res_list[[i]] <- data.frame(pred_x = model1 %>% keras::predict_classes(train))
+  tmp$total_accuracy[i] <- model1 %>% keras::evaluate(train, train_lab) %>% .[[2]]
+  tmp$total_loss[i] <- model1 %>% keras::evaluate(train, train_lab) %>% .[[1]]
+  }
+res <- do.call(cbind, res_list) 
+colnames(res) <- seq(1, ncol(res), 1)
+
+score_return <- function(input, use_weights=FALSE){
+  test <- input %>% 
+  mutate(weight = total_accuracy/test_accuracy)
+  
+  selected <- res[, colnames(res) %in% test$iter]
+  
+  if(use_weights == TRUE){
+    raw <- rowMeans2(as.matrix(selected))
+    return(mean(abs(train_lab[,2] - raw)))
+  } else {
+    
+    weighted <- rowWeightedMeans(as.matrix(selected), w = test$weight)
+    return(mean(abs(train_lab[,2] - weighted)))
+  }
+  }
+
+incre <- seq(0.85, 0.96, 0.01)
+total_n <- do.call(rbind, lapply(1:length(incre), function(x) nrow(tmp %>% filter(total_accuracy >= incre[x]))))
+test_n <- do.call(rbind, lapply(1:length(incre), function(x) nrow(tmp %>% filter(test_accuracy >= incre[x]))))
+total <- do.call(rbind, lapply(1:length(incre), function(x) score_return(use_weight = FALSE, tmp %>% filter(total_accuracy >= incre[x]))))
+test <- do.call(rbind, lapply(1:length(incre), function(x) score_return(use_weight = FALSE, tmp %>% filter(test_accuracy >= incre[x]))))
+
+weighted <- data.frame(incre, total_n, total=total, test_n, test = test)
+# raw <- data.frame(incre, total_n, total=total, test_n, test = test)
+
+key
+#####
+
+```
+
+

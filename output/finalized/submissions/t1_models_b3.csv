@@ -1,0 +1,4 @@
+cohort,round,set,test_loss,test_acc,true_pos_rate,false_pos_rate,file_id
+cohort1,r5,10,0.5743,0.9636,1,0.2,output/finalized/trained_models2/cohort1_r5_set10.h5
+cohort2,r5,9,0.1581,1,0.75,0,output/finalized/trained_models2/cohort2_r5_set9.h5
+cohort3,r5,4,0.4707,0.9222,0.9556,0.0444,output/finalized/trained_models2/cohort3_r5_set4.h5

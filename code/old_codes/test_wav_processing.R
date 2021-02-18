@@ -1,0 +1,82 @@
+require(dplyr)
+require(reshape2)
+
+setwd("/Volumes/R2D2/Users/eoh/Documents/R_projects/rainforest/")
+source("code/fns.R")
+
+test_files <- list.files("data/test_wav", pattern="wav", full.names = TRUE)
+test_files <- data.frame(recording_id = do.call(rbind, strsplit(test_files, "/|.wav"))[,4], file_id = test_files)
+
+test_file_processor <- function(input_data, batch_number){
+  
+  key <- list.files("output/CNN_ver4/", pattern="key", full.names = TRUE)
+  key <- do.call(rbind, lapply(1:length(key), function(x) readRDS(key[x]))) 
+  durations <- key %>%
+    mutate(duration = round(duration, digits=4)) %>%
+    select(species_id, duration) %>%
+    distinct(.) %>%
+    mutate(lost_data = 60-floor(60/duration)*duration) 
+  
+  if(dir.exists("output/test_files/") != TRUE){
+    dir.create("output/test_files/")
+  }
+  
+  for(j in 1:nrow(durations)){
+    
+    tmp_key <- durations[j,]
+    
+    time <- as.numeric(as.character(unique(specmaker(input_data[1,], low_f = 50, high_f = 8500)$time)))
+    
+    frames <- data.frame(time = time, 
+                         breaks1 = cut(time,include.lowest=TRUE, breaks=seq(0, 60, tmp_key$duration)), 
+                         breaks2 = cut(time, include.lowest=TRUE, breaks=seq(tmp_key$duration/2, 60, tmp_key$duration)))
+    
+    res <- do.call(rbind, lapply(1:nrow(input_data), function(x) specmaker(input_data[x,], low_f = 50, high_f = 8500))) %>%
+      left_join(., frames, by="time") %>%
+      group_by(FreqHz) %>%
+      mutate(value = value - mean(value)) %>%
+      ungroup() %>%
+      mutate(value = (value - min(value)) / (max(value) - min(value)))
+    
+    frame1 <- unique(res$breaks1)[!is.na(unique(res$breaks1))]
+    
+    for(i in 1:length(frame1)){
+      tmp <- res %>% 
+        filter(breaks1 == frame1[i]) %>% 
+        select(-breaks1, -breaks2)
+      dir_name <- paste0("output/test_files/s", tmp_key$species_id)
+      
+      if(dir.exists(dir_name) != TRUE){
+        dir.create(dir_name)
+      }
+      
+      filename <- paste0(dir_name,"/b", batch_number, "_f1-",i,".RDS")
+      print(filename)
+      saveRDS(tmp, filename)
+    }
+    
+    frame2 <- unique(res$breaks2)[!is.na(unique(res$breaks2))]
+    
+    for(i in 1:length(frame2)){
+      tmp <- res %>% 
+        filter(breaks2 == frame2[i]) %>% 
+        select(-breaks1, -breaks2)
+      dir_name <- paste0("output/test_files/s", tmp_key$species_id)
+      
+      if(dir.exists(dir_name) != TRUE){
+        dir.create(dir_name)
+      }
+      
+      filename <- paste0(dir_name,"/b", batch_number, "_f2-",i,".RDS")
+      print(filename)
+      saveRDS(tmp, filename)
+    }
+    
+  }
+  
+}
+
+test_file_processor(test_files[1:498,], "1")
+test_file_processor(test_files[499:996,], "2")
+test_file_processor(test_files[997:1494,], "3")
+test_file_processor(test_files[1495:1992,], "4")

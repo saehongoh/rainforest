@@ -1,0 +1,185 @@
+---
+title: "CNN_FreqLayers"
+output: html_document
+---
+
+```{r}
+library(tuneR, warn.conflicts = F, quietly = T) # nice functions for reading and manipulating .wav files
+library(signal, warn.conflicts = F, quietly = T) # signal processing functions
+library(dplyr)
+library(ggplot2)
+require(reshape2)
+library(keras)
+x_files <- list.files("output/CNN", pattern="trainX", full.names = TRUE)
+data_x <- readRDS("output/CNN/trainX_species_1_data.RDS")
+```
+
+```{r, fig.height=5, fig.width=8}
+negs <- data_x %>%
+  filter(cate == "false_positive") %>%
+  select(recording_id, species_id) %>% distinct(.) 
+
+pos <- data_x %>%
+  filter(cate == "true_positive") %>%
+  select(recording_id, species_id) %>% distinct(.) 
+
+data_x %>% 
+  filter(recording_id %in% sample(pos$recording_id, 12)) %>%
+  # filter(cate == "false_positive") %>%
+  # group_by(recording_id) %>% 
+  # sample_n(., 1) %>%
+  filter(FreqHz > 500 & FreqHz < 3000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  # melt(., id.var=c('recording_id','cat1','cat2','zts')) %>%
+  # rename(FreqHz = variable) %>%
+  ggplot(aes(x = zts, y = FreqHz, col = value)) +
+  geom_tile() + 
+  scale_color_gradient2(low = ("darkblue"), mid = "grey90", midpoint = 0.5, high = ("red")) +
+  facet_wrap(~recording_id, ncol=2, strip.position = "right")
+
+```
+
+```{r}
+tmp <- data_x %>%
+  # filter(FreqHz > 500 & FreqHz < 3000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  select(recording_id, cat1, cat2, FreqHz, value, zts) %>%
+  arrange(recording_id)
+
+freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), FreqBin = cut(unique(tmp$FreqHz), 4, labels = c(1,2,3,4)))
+
+f1 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 1) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+f2 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 2) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+f3 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 3) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+f4 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 4) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+lister <- function(x){
+      list(f1 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix(),
+           f2 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix(),
+           f3 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix(),
+           f4 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix())
+  }
+
+times <- unique(tmp$zts)
+train <- lapply(1:length(times), function(x) lister(x))
+train_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+train_x_lab <- f1 %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% to_categorical()
+
+
+```
+
+#### Import train Y
+```{r}
+data_y <- readRDS("output/CNN/trainY_species_1_data.RDS")
+
+tmp <- data_y %>%
+  # filter(FreqHz > 500 & FreqHz < 3000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  select(recording_id, cat1, cat2, FreqHz, value, zts) %>%
+  arrange(recording_id)
+
+freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), FreqBin = cut(unique(tmp$FreqHz), 4, labels = c(1,2,3,4)))
+
+f1 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 1) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+f2 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 2) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+f3 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 3) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+f4 <- tmp %>%
+  left_join(., freq_bin, by="FreqHz") %>%
+  filter(FreqBin == 4) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) 
+
+lister <- function(x){
+      list(f1 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix(),
+           f2 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix(),
+           f3 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix(),
+           f4 %>% filter(zts ==times[x])%>%select(-recording_id, -cat1, -cat2, -zts) %>% as.matrix())
+  }
+
+times <- unique(tmp$zts)
+train <- lapply(1:length(times), function(x) lister(x))
+train_y <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+train_y_lab <- f1 %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% to_categorical()
+
+```
+
+### Good model:87-88%
+```{r}
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_conv_2d(input_shape = c(dim(train_x)[-1]),
+                filters = 16, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_batch_normalization() %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.20) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  # layer_dense(units = 16, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dense(units = 2, activation = 'sigmoid',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  # layer_dense(units = 2, activation = 'sigmoid') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = "adam"
+  )
+
+model %>% fit(train_x, train_x_lab, batch_size = 10, epochs = 50)
+
+model %>% evaluate(train_x, train_x_lab)
+pred <- model %>% predict_classes(train_x) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_x_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+```
+
+
+```{r}
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+```

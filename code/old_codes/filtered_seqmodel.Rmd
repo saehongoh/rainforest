@@ -1,0 +1,232 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+
+library(tuneR, warn.conflicts = F, quietly = T) # nice functions for reading and manipulating .wav files
+library(signal, warn.conflicts = F, quietly = T) # signal processing functions
+library(oce, warn.conflicts = F, quietly = T) # image plotting functions and nice color maps
+library(dplyr)
+library(ggplot2)
+require(reshape2)
+library(keras)
+
+
+```
+
+### Import X
+```{r}
+export <- readRDS("output/CNN/trainX_species_1_data.RDS")
+
+tmp <- export %>%
+  filter(FreqHz > 4000 & FreqHz < 5000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  select(recording_id, cat1, cat2, FreqHz, value, zts) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) %>%
+  arrange(recording_id)
+
+times <- unique(tmp$zts)
+train <- lapply(1:length(times), function(x) tmp %>%
+         filter(zts ==times[x]) %>% 
+           select(-recording_id, -cat1, -cat2, -zts) %>% 
+           as.matrix())
+
+train_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]]), length(train), 1))
+train_x_lab <- tmp %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% to_categorical()
+```
+
+### Import Y
+```{r}
+export <- readRDS("output/CNN/trainY_species_1_data.RDS")
+
+tmp <- export %>%
+  filter(FreqHz > 4000 & FreqHz < 5000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  select(recording_id, cat1, cat2, FreqHz, value, zts) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) %>%
+  arrange(recording_id)
+
+times <- unique(tmp$zts)
+train <- lapply(1:length(times), function(x) tmp %>%
+         filter(zts ==times[x]) %>% 
+           select(-recording_id, -cat1, -cat2, -zts) %>% 
+           as.matrix())
+
+train_y <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]]), length(train), 1))
+train_y_lab <- tmp %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% to_categorical()
+```
+
+
+### Good model
+```{r}
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3,3), activation = 'relu', input_shape = c(dim(train_x)[-1])) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = 0.15) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  layer_dense(units = 2, activation = 'sigmoid') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = "adam"
+  )
+
+model %>% fit(train_x, train_x_lab, batch_size = 10, epochs = 75)
+
+model %>% evaluate(train_x, train_x_lab)
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+```
+
+
+### Test model
+```{r}
+base_model <- application_vgg16(weights = 'imagenet', include_top = FALSE)
+
+inputs <- base_model$input %>%
+  layer_input(batch_shape = tmp, shape = NULL, dtype = NULL)
+
+tmp <- base_model$input
+tmp$set_shape <- c(dim(train_x))
+tmp$get_shape
+
+layer_input(tensor = tmp)
+train_dims <- dim(train_x)[-1]
+
+tmp <- base_model$input_shape
+tmp[[2]] <- train_dims[1]
+tmp[[3]] <- train_dims[2]
+tmp[[4]] <- train_dims[3]
+
+
+predictions <- base_model$output %>% 
+  layer_global_average_pooling_2d(trainable = T) %>% 
+  layer_dense(64, trainable = T) %>%
+  layer_activation("relu", trainable = T) %>%
+  layer_dropout(0.4, trainable = T) %>%
+  layer_dense(2, trainable=T) %>%    ## important to adapt to fit the 27 classes in the dataset!
+  layer_activation("softmax", trainable=T)
+
+model <- keras_model(inputs = inputs, outputs = predictions)
+
+
+model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_rmsprop(lr = 0.003, decay = 1e-6),  ## play with the learning rate
+  metrics = "accuracy"
+)
+
+model %>% fit(train_x, train_x_lab, batch_size = 10, epochs = 10)
+
+
+hist <- model %>% fit_generator(
+  train_generator,
+  steps_per_epoch = as.integer(train_samples/batch_size), 
+  epochs = 20, 
+  validation_data = validation_generator,
+  validation_steps = as.integer(validation_samples/batch_size),
+  verbose=2
+)
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', padding="same", input_shape = c(dim(train_x)[-1])) %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides=2) %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides=2) %>%
+  # layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  # layer_batch_normalization() %>%
+  # layer_dropout(rate = 0.15) %>%
+  # layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  layer_dense(units = 2, activation = 'softmax') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = "adam"
+  )
+summary(model)
+
+model %>% fit(train_x, train_x_lab, batch_size = 10, epochs = 75)
+
+model %>% evaluate(train_x, train_x_lab)
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+
+```
+
+### VGG model
+```{r}
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_conv_2d(filters = 8, kernel_size = c(3,3), activation = 'relu', padding="same", input_shape = c(dim(train_x)[-1])) %>%
+  layer_conv_2d(filters = 8, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides=2) %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides=2) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides=2) %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu', padding="same") %>%  
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu', padding="same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), strides=2) %>%
+  layer_flatten() %>%
+  layer_dense(units = 16, kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dense(units = 16, kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dense(units = 2, activation = 'softmax') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = "adam"
+  )
+summary(model)
+model %>% fit(train_x, train_x_lab, batch_size = 10, epochs = 50)
+
+model %>% evaluate(train_x, train_x_lab)
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+
+```
+

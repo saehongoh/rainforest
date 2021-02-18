@@ -1,0 +1,113 @@
+---
+title: "QC_data"
+output: html_document
+---
+
+```{r}
+require(dplyr)
+require(tuneR)
+
+dets <- readRDS("output/pos_x.RDS")[[2]] %>%
+  mutate(duration = t_max - t_min)
+
+
+```
+
+
+```{r}
+
+species_list <- unique(dets$species_id)
+
+for(j in 1:length(species_list)) {
+  tmp <- dets %>%
+    filter(species_id == species_list[j]) %>%
+    mutate(bi_diff=0, time=NA, raw = NA, norm = NA)
+  
+  for (i in 1:nrow(tmp)) {
+    df1 <- readWave(tmp$file_id[i])
+    sound_length <- round(length(df1@left) / df1@samp.rate, 2)
+    time <- seq(0, sound_length, sound_length / length(df1@left))
+    time <- time[-length(time)]
+    
+    max_duration <- max(tmp$duration)
+    
+    if (tmp$duration[i] != max_duration) {
+      bi_diff <- (max_duration - tmp$duration[i]) / 2
+      df2 <- data.frame(time, value = df1@left) %>%
+        filter(time > tmp$t_min[i] - bi_diff &
+                 time < tmp$t_max[i] + bi_diff)
+      df2$norm <- df2$value / max(abs(df2$value))
+      tmp$bi_diff[i] <- bi_diff
+    } else if (tmp$duration[i] == max_duration) {
+      df2 <- data.frame(time, value = df1@left) %>%
+        filter(time > tmp$t_min[i] & time < tmp$t_max[i])
+      df2$norm <- df2$value / max(abs(df2$value))
+    } else{
+      
+    }
+    tmp$time[i] <- list(df2$time)
+    tmp$raw[i] <- list(df2$value)
+    tmp$norm[i] <- list(df2$norm)
+  }
+  
+  saveRDS(tmp, paste0("output/songtypes/truesigs_species_", species_list[j], ".RDS"))
+}
+
+```
+
+```{r}
+
+dets <- readRDS("output/neg_x.RDS")[[2]] %>%
+  mutate(duration = t_max - t_min)
+
+```
+
+
+```{r}
+
+species_list <- unique(dets$species_id)
+
+for(j in 1:length(species_list)) {
+  tmp <- dets %>%
+    filter(species_id == species_list[j]) %>%
+    mutate(bi_diff=0, time=NA, raw = NA, norm = NA)
+  
+  for (i in 1:nrow(tmp)) {
+    df1 <- readWave(tmp$file_id[i])
+    sound_length <- round(length(df1@left) / df1@samp.rate, 2)
+    time <- seq(0, sound_length, sound_length / length(df1@left))
+    time <- time[-length(time)]
+    
+    max_duration <- max(tmp$duration)
+    
+    if (tmp$duration[i] != max_duration) {
+      bi_diff <- (max_duration - tmp$duration[i]) / 2
+      df2 <- data.frame(time, value = df1@left) %>%
+        filter(time > tmp$t_min[i] - bi_diff &
+                 time < tmp$t_max[i] + bi_diff)
+      df2$norm <- df2$value / max(abs(df2$value))
+      tmp$bi_diff[i] <- bi_diff
+    } else if (tmp$duration[i] == max_duration) {
+      df2 <- data.frame(time, value = df1@left) %>%
+        filter(time > tmp$t_min[i] & time < tmp$t_max[i])
+      df2$norm <- df2$value / max(abs(df2$value))
+    } else{
+      
+    }
+    tmp$time[i] <- list(df2$time)
+    tmp$raw[i] <- list(df2$value)
+    tmp$norm[i] <- list(df2$norm)
+  }
+  
+  saveRDS(tmp, paste0("output/songtypes/falsesigs_species_", species_list[j], ".RDS"))
+}
+
+```
+
+```{r}
+
+print("done")
+
+```
+
+

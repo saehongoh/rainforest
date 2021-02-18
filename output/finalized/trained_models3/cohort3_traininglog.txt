@@ -1,6 +1,0 @@
-timestamp	cohort	round	set	test_loss	test_acc	true_pos_rate	false_pos_rate
-06:18	cohort3	0	0	0	0	0	0
-08:00	cohort3	1	1	1.3379	0.6667	0.6889	0.3111
-08:31	cohort3	1	2	1.3612	0.5778	0.7333	0.2889
-08:47	cohort3	1	3	1.2176	0.7222	0.7778	0.2222
-09:13	cohort3	1	4	1.1774	0.7667	0.7556	0.2444

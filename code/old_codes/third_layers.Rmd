@@ -1,0 +1,828 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+
+library(tuneR, warn.conflicts = F, quietly = T) # nice functions for reading and manipulating .wav files
+library(signal, warn.conflicts = F, quietly = T) # signal processing functions
+library(oce, warn.conflicts = F, quietly = T) # image plotting functions and nice color maps
+library(dplyr)
+library(ggplot2)
+require(reshape2)
+library(keras)
+key1 <- readRDS("output/pos_x.RDS")[[2]] %>%
+  mutate(duration = round(t_max - t_min, digits=4)) 
+
+key2 <- readRDS("output/neg_x.RDS")[[2]] %>%
+  mutate(duration = round(t_max - t_min, digits=4)) 
+
+key <- rbind(key1, key2) %>%
+  mutate(cat1 = ifelse(cate == "true_positive", 1, 0),
+         cat2 = ifelse(cate == "false_positive", 1, 0))
+key <- key[sample(nrow(key)),]
+
+```
+
+```{r}
+
+specmaker <- function(tmp_key, low_f, high_f) {
+  # define path to audio file
+  fin = tmp_key$file_id
+  
+  # read in audio file
+  data = readWave(fin)
+  
+  # extract signal
+  snd = data@left
+  
+  # determine duration
+  dur = length(snd) / data@samp.rate
+  
+  # determine sample rate
+  fs = data@samp.rate
+  
+  # demean to remove DC offset
+  snd = snd - mean(snd)
+  
+  # plot waveform
+  # plot(snd, type = 'l', xlab = 'Samples', ylab = 'Amplitude')
+  
+  # number of points to use for the fft
+  nfft = 1024
+  # window size (in points)
+  window = 256
+  # overlap (in points)
+  overlap = 128
+  
+  # create spectrogram
+  spec = specgram(
+    x = snd,
+    n = nfft,
+    Fs = fs,
+    window = window,
+    overlap = overlap
+  )
+  # discard phase information
+  P = abs(spec$S)
+  
+  # normalize
+  P = P / max(P)
+  
+  # convert to dB
+  P = 10 * log10(P)
+  
+  # config time axis
+  t = spec$t
+  
+  time_key <-
+    data.frame(variable = paste0("X", seq(1, length(t), 1)), 
+               seqt = seq(1, length(t), 1), 
+               time = round(t, digits=4))
+  
+  tmp <- data.frame(FreqHz = spec$f, (P)) %>%
+    filter(FreqHz > low_f & FreqHz < high_f) %>%
+    melt(., id.var = "FreqHz") %>%
+    left_join(., time_key, by = "variable")
+  tmp <- cbind(tmp_key, tmp, row.names = NULL) 
+  
+  return(tmp)
+}
+
+
+```
+
+```{r}
+
+species_list <- sort(unique(key$species_id))
+
+for(j in 1:length(species_list)) {
+  tmp <- key %>%
+    filter(species_id == species_list[j]) 
+  
+  pos_list <- list(NULL)
+  max_duration = max(tmp$duration)
+  
+  for (i in 1:nrow(tmp)) {
+    tmp_key <- tmp[i,]
+    res <- specmaker(tmp_key, low_f = 50, high_f = 10000)
+    
+    if (tmp_key$duration != max_duration) {
+      bi_diff <- (max_duration - tmp_key$duration) / 2
+      res <- res  %>%
+        filter(time >= (tmp_key$t_min - bi_diff) &
+                 time <= (tmp_key$t_max + bi_diff))
+    } else {
+      res <- res %>%
+        filter(time >= tmp_key$t_min & time <= tmp_key$t_max)
+    }
+    # print(dim(res))
+    
+    pos_list[[i]] <- res %>%
+      group_by(FreqHz) %>%
+      mutate(value = value - median(value)) %>%
+      ungroup() %>%
+      mutate(value = (value - min(value)) / (max(value) - min(value)))
+  }
+  
+  res <- do.call(rbind, pos_list)
+  
+  rowss <- res %>%
+    group_by(recording_id) %>%
+    summarise(n = n())
+  
+  export <- res %>%
+    group_by(recording_id) %>%
+    slice(1:min(rowss$n))
+  
+  saveRDS(export, paste0("output/CNN/species_", species_list[j], "_data.RDS"))
+  # saveRDS(tmp,paste0("output/CNN/species_", species_list[j], "_key.RDS"))
+}
+```
+
+```{r}
+export <- readRDS("output/CNN/trainX_species_1_data.RDS")
+
+tmp <- export %>%
+  filter(FreqHz > 4000 & FreqHz < 5000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  select(recording_id, cat1, cat2, FreqHz, value, zts) %>%
+  dcast(recording_id + cat1 + cat2 + zts ~ FreqHz) %>%
+  arrange(recording_id)
+
+times <- unique(tmp$zts)
+train <- lapply(1:length(times), function(x) tmp %>%
+         filter(zts ==times[x]) %>% 
+           select(-recording_id, -cat1, -cat2, -zts) %>% 
+           as.matrix())
+```
+
+```{r, fig.height=4, fig.width=8}
+negs <- export %>%
+  filter(cate == "false_positive") %>%
+  select(recording_id, species_id) %>% distinct(.) 
+
+pos <- export %>%
+  filter(cate == "true_positive") %>%
+  select(recording_id, species_id) %>% distinct(.) 
+
+export %>% 
+  filter(recording_id %in% sample(pos$recording_id, 12)) %>%
+  # filter(cate == "false_positive") %>%
+  # group_by(recording_id) %>% 
+  # sample_n(., 1) %>%
+  filter(FreqHz > 500 & FreqHz < 3000) %>%
+  group_by(recording_id) %>%
+  mutate(zts = seqt - min(seqt)) %>%
+  # melt(., id.var=c('recording_id','cat1','cat2','zts')) %>%
+  # rename(FreqHz = variable) %>%
+  ggplot(aes(x = zts, y = FreqHz, col = value)) +
+  geom_tile() + 
+  scale_color_gradient2(low = ("darkblue"), mid = "grey90", midpoint = 0.5, high = ("red")) +
+  facet_wrap(~recording_id, ncol=2, strip.position = "right")
+
+```
+
+### Good model
+```{r}
+
+train_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]]), length(train), 1))
+train_y <- tmp %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% to_categorical()
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3,3), activation = 'relu', input_shape = c(dim(train_x)[-1])) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = 0.15) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  layer_dense(units = 2, activation = 'sigmoid') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = "adam"
+  )
+
+model %>% fit(train_x, train_y, batch_size = 10, epochs = 75)
+
+model %>% evaluate(train_x, train_y)
+pred <- model %>% predict_classes(train_x) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+```
+
+
+```{r}
+library(keras)
+
+# generate dummy data
+x_train <- matrix(runif(1000*20), nrow = 1000, ncol = 20)
+y_train <- matrix(round(runif(1000, min = 0, max = 1)), nrow = 1000, ncol = 1)
+x_test <- matrix(runif(100*20), nrow = 100, ncol = 20)
+y_test <- matrix(round(runif(100, min = 0, max = 1)), nrow = 100, ncol = 1)
+
+# create model
+model <- keras_model_sequential()
+
+# define and compile the model
+model %>% 
+  layer_dense(units = 29, activation = 'relu', input_shape = c(29, 336, 212)) %>% 
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 29, activation = 'relu') %>% 
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 1, activation = 'sigmoid') %>% 
+  compile(
+    loss = 'binary_crossentropy',
+    optimizer = 'rmsprop',
+    metrics = c('accuracy')
+  )
+
+summary(model.card)
+
+# train 
+model %>% fit(x_train, y_train, epochs = 20, batch_size = 29)
+
+# evaluate
+score = model %>% evaluate(x_train, y_train, batch_size=29)
+
+dim(x_train)
+model.card <- keras_model_sequential()
+model.card %>%                  
+ layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu', 
+                input_shape = c(100,100,3)) %>% 
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu') %>% 
+  layer_max_pooling_2d(pool_size = c(2,2)) %>% 
+  layer_dropout(rate = 0.25) %>% 
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>% 
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>% 
+  layer_max_pooling_2d(pool_size = c(2,2)) %>% 
+  layer_dropout(rate = 0.25) %>% 
+  layer_flatten() %>% 
+  layer_dense(units = 256, activation = 'relu') %>% 
+  layer_dropout(rate = 0.25) %>% 
+  layer_dense(units = 10, activation = 'softmax') %>% 
+  compile(
+    loss = 'categorical_crossentropy', 
+    optimizer = optimizer_sgd(lr = 0.01, decay = 1e-6, momentum = 0.9, nesterov = TRUE)
+  )
+
+model %>% fit(x_train, y_train, epochs = 20, batch_size = 29)
+```
+
+```{r}
+
+model %>% evaluate(x_train, y_train) #Evaluation of training set 
+pred <- model %>% predict_classes(x_train) #-----Classification
+Train_Result <- table(Predicted = pred, Actual = y_train) #----Results
+print(Train_Result)
+
+model %>% evaluate(x_test, y_test) #Evaluation of training set 
+pred <- model %>% predict_classes(x_test) #-----Classification
+Test_Result <- table(Predicted = pred, Actual = y_test) 
+
+
+# rownames(Train_Result)<-rownames(Test_Result)<-colnames(Train_Result)<-colnames(Test_Result)<-c("Clubs", "Hearts", "Spades", "Diamonds")
+print(Test_Result)
+
+```
+
+
+```{r}
+
+# train_x <- array(c(as.numeric(unlist(pos_list))), dim=c(175, 212, 336, 1))
+# tmp <- array(unlist(pos_list), c(length(pos_list), dim(pos_list[[1]]), 1))
+
+# train_y <- as.matrix(c(rep(0, 29), rep(1,29))) %>% to_categorical()
+
+model <- keras_model_sequential()
+
+# define and compile model
+# input: 100x100 images with 3 channels -> (100, 100, 3) tensors.
+# this applies 32 convolution filters of size 3x3 each.
+model %>%
+  layer_conv_2d(filters = 29, kernel_size = c(3,3), activation = 'relu',
+                input_shape = c(336,212,1)) %>%
+  layer_conv_2d(filters = 29, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_conv_2d(filters = 58, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 58, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_flatten() %>%
+  layer_dense(units = 256, activation = 'relu') %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 2, activation = 'softmax') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"),
+    optimizer = optimizer_sgd(lr = 0.01, decay = 1e-6, momentum = 0.9, nesterov = TRUE)
+  )
+
+
+summary(model)
+model %>% fit(train_x, train_y, batch_size = 29, epochs = 10, validation_split=0.2)
+model %>% evaluate(train_x, train_y)
+pred <- model %>% predict_classes(x_train) #-----Classification
+
+# score <- model %>% evaluate(x_test, y_test, batch_size = 29)
+pos_list
+```
+
+```{r}
+
+# generate dummy data
+x_train <- array(runif(100 * 100 * 100 * 3), dim = c(58, 336, 212, 1))
+y_train <- runif(58, min = 0, max = 2) %>%
+  round() %>%
+  matrix(nrow = 58, ncol = 2) %>%
+  to_categorical()
+
+y_train <- runif(100, min = 0, max = 9) %>%
+  round() %>%
+  matrix(nrow = 100, ncol = 1) %>%
+  to_categorical(num_classes = 10)
+
+# create model
+model <- keras_model_sequential()
+
+# define and compile model
+# input: 100x100 images with 3 channels -> (100, 100, 3) tensors.
+# this applies 32 convolution filters of size 3x3 each.
+model %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu',
+                input_shape = c(336,212,1)) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_flatten() %>%
+  layer_dense(units = 256, activation = 'relu') %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 2, activation = 'softmax') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    optimizer = optimizer_sgd(lr = 0.01, decay = 1e-6, momentum = 0.9, nesterov = TRUE)
+  )
+
+summary(model)
+# train
+model %>% fit(x_train, y_train, batch_size = 32, epochs = 10)
+model %>% evaluate(x_train, y_train)
+
+x_test <- array(runif(20 * 100 * 100 * 3), dim = c(20, 100, 100, 3))
+y_test <- runif(20, min = 0, max = 1) %>%
+  round() %>%
+  matrix(nrow = 20, ncol = 1) %>%
+  to_categorical(num_classes = 2)
+
+model %>% evaluate(x_test, y_test, batch_size = 32)
+model %>% evaluate(x_train, y_train) #Evaluation of training set 
+pred <- model %>% predict_classes(x_train) #-----Classification
+Train_Result <- table(Predicted = pred, Actual = y_train) #----Results
+pred
+y_train
+
+print(Train_Result)
+
+model %>% evaluate(x_test, y_test) #Evaluation of training set 
+pred <- model %>% predict_classes(x_test) #-----Classification
+Test_Result <- table(Predicted = pred, Actual = y_test) 
+
+```
+
+```{r}
+# generate dummy data
+x_train <- array(runif(100 * 100 * 100 * 3), dim = c(100, 100, 100, 3))
+
+y_train <- runif(100, min = 0, max = 9) %>%
+  round() %>%
+  matrix(nrow = 100, ncol = 1) %>%
+  to_categorical(num_classes = 10)
+y_train
+x_test <- array(runif(20 * 100 * 100 * 3), dim = c(20, 100, 100, 3))
+
+y_test <- runif(20, min = 0, max = 9) %>%
+  round() %>%
+  matrix(nrow = 20, ncol = 1) %>%
+  to_categorical(num_classes = 10)
+
+# create model
+model <- keras_model_sequential()
+
+# define and compile model
+# input: 100x100 images with 3 channels -> (100, 100, 3) tensors.
+# this applies 32 convolution filters of size 3x3 each.
+model %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu',
+                input_shape = c(100,100,3)) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_flatten() %>%
+  layer_dense(units = 256, activation = 'relu') %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 10, activation = 'softmax') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    optimizer = optimizer_sgd(lr = 0.01, decay = 1e-6, momentum = 0.9, nesterov = TRUE)
+  )
+
+# train
+model %>% fit(x_train, y_train, batch_size = 32, epochs = 10)
+
+model %>% evaluate(x_train, y_train) #Evaluation of training set 
+pred <- model %>% predict_classes(x_train) #-----Classification
+Train_Result <- table(Predicted = pred, Actual = y_train) #----Results
+pred
+
+```
+
+
+```{r fig.height=15, fig.width=4}
+
+key1 <- key %>% filter(species_id == 3)
+
+res_list <- vector('list', nrow(key1))
+
+for(i in 1:nrow(key1)){
+ tmp_key <- key1[i,]
+ tmp <- specmaker(tmp_key) %>%
+  filter(FreqHz > 50 & FreqHz < 10000)
+  res_list[[i]] <- tmp %>%
+    filter(time > tmp_key$t_min & time < tmp_key$t_max) %>%
+    mutate(new_seqt = seqt-min(seqt)) 
+  }
+
+res <- do.call(rbind, res_list)
+
+res %>%
+  filter(FreqHz > 500 & FreqHz < 3000) %>%
+  ggplot(aes(x = new_seqt, y = FreqHz, col = value)) +
+  geom_tile() + 
+  scale_color_viridis_c() +
+  facet_wrap(~recording_id, ncol=1, strip.position = "right") + 
+      theme(axis.line=element_blank(),
+      axis.text.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank(),
+      legend.position="none",
+      panel.background=element_blank(),
+      panel.border=element_blank(),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      plot.background=element_blank())
+```
+
+
+```{r fig.height=15, fig.width=2}
+res %>%
+  filter(FreqHz > 500 & FreqHz < 3000) %>%
+  group_by(recording_id, FreqHz) %>%
+  mutate(value = value + -min(value)) %>%
+  mutate(value = value/mean(value)) %>%
+  ggplot(aes(x = new_seqt, y = FreqHz, col = value)) +
+  geom_tile() + 
+  scale_color_viridis_c() +
+  facet_wrap(~recording_id, ncol=1, strip.position = "right")
+```
+  
+  
+  
+  
+```{r}
+  
+  group_by(species_id, songtype_id, t_min, f_min, t_max, f_max, cate, duration, FreqHz, seqt, time, new_seqt) %>%
+  summarise(norm = mean(value))  %>%
+  ggplot(aes(x = new_seqt, y = FreqHz, col = norm)) +
+  geom_tile() + 
+  scale_color_viridis_c() +
+  facet_wrap(~., ncol=1, strip.position = "right")
+
+```
+
+
+
+```{r}
+freq_list <- unique(res$FreqHz)
+
+pr_tmp <- res %>%
+  # filter(FreqHz == freq_list[1]) %>%
+  select(FreqHz, recording_id, new_seqt, value) %>%
+  dcast(new_seqt +recording_id ~ FreqHz) %>%
+  mutate_all(., function(x) ifelse(is.na(x), 0, x))
+
+pr_res <- prcomp(as.matrix(pr_tmp[,3:ncol(pr_tmp)]))
+
+plot(pr_res$sdev)
+
+res.ind <- get_pca_ind(pr_res)
+res.var <- get_pca_var(pr_res)
+
+data.frame(pr_tmp[,1:2], res.ind$coord) %>%
+  # melt(., id.var=c("FreqHz","new_seqt")) %>%
+  ggplot(aes(x=Dim.1, y= Dim.2, col=recording_id)) +
+  geom_point(size=0.5) +
+  scale_color_viridis_d() 
+
+dim(pr_tmp)
+data.frame(res.var$cos2) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  ggplot(aes(x=(freq), y= value, col=variable)) +
+  geom_line() +
+  theme(legend.position = "none")
+
+data.frame(res.var$contrib) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  filter(variable =="Dim.1") %>%
+  filter(value > 5)
+
+```
+
+
+```{r fig.height=8, fig.width=6}
+real <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(time > tmp_key$t_min & time < tmp_key$t_max) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "real")
+
+sample_points <- unique(others$time)
+sample_points <- sample_points[sample_points < (min(real$time) - (max(real$time) - min(real$time))) | sample_points > max(real$time)]
+sample_points <- sample_points[sample_points < max(unique(tmp$time)) -  (max(real$time) - min(real$time))]
+
+start <- unique(tmp[tmp$time == sample(sample_points, 1),]$seqt)
+range <- seq(start, start+nrow(real)-1, 1)
+
+other1 <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(seqt %in% range) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "fake_1")
+
+start <- unique(tmp[tmp$time == sample(sample_points, 1),]$seqt)
+range <- seq(start, start+nrow(real)-1, 1)
+
+other2 <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(seqt %in% range) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "fake_2")
+
+start <- unique(tmp[tmp$time == sample(sample_points, 1),]$seqt)
+range <- seq(start, start+nrow(real)-1, 1)
+
+other3 <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(seqt %in% range) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "fake_3")
+
+rbind(real, other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  rename(freqHz = variable) %>%
+  mutate(freqHz = as.numeric(as.character(freqHz))) %>%
+  # filter(freqHz < 1000) %>%
+  ggplot(aes(x = new_seqt, y = freqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  # geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  # geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  scale_color_viridis_c() +
+  scale_y_continuous(breaks = seq(0, max(tmp$FreqHz), by = 1000)) +
+  facet_wrap(~cate, ncol=1)
+
+rbind(real, other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  rename(freqHz = variable) %>%
+  mutate(freqHz = as.numeric(as.character(freqHz))) %>%
+  group_by(cate, freqHz) %>%
+  mutate(value = value - median(value)) %>%
+  # filter(freqHz < 10000) %>%
+  ggplot(aes(x = new_seqt, y = freqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  # geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  # geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  scale_color_viridis_c() +
+  scale_y_continuous(breaks = seq(0, max(tmp$FreqHz), by = 1000)) +
+  facet_wrap(~cate, ncol=1)
+```
+
+
+```{r}
+periods <- (max(real$time) - min(real$time))/2
+
+df1 <- real %>% 
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  rename(freqHz = variable) %>%
+  group_by(cate, freqHz) %>%
+  mutate(value = value - median(value)) %>%
+  mutate(freqHz = as.numeric(as.character(freqHz))) %>%
+  mutate(sin = sin(time/periods*2*pi)) %>%
+  mutate(cos = cos(time/periods*2*pi))
+
+freq_list <- unique(df1$freqHz)
+res_list <- vector('list', length(freq_list))
+
+for(i in 1:length(freq_list)){
+  tmp1 <- df1 %>% filter(freqHz == freq_list[i])
+  res <- anova(lm(value ~ sin + cos + time, data=tmp1), lm(value~time, data=tmp1))$`Pr(>F)`[2]
+  res_list[[i]] <- data.frame(freqHz = freq_list[i], harm.pval = res)
+}
+
+do.call(rbind, res_list) %>%
+  mutate(harm.pval = p.adjust(harm.pval, 'none')) %>%
+  ggplot(aes(x=freqHz, y=-log10(harm.pval))) +
+  geom_point() +
+  scale_x_continuous(breaks=seq(0, 10000, 250)) + coord_flip()
+
+```
+
+
+```{r}
+background <- rbind(other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  group_by(variable) %>%
+  summarise(bg = median(value)) 
+
+df1 <- rbind(real, other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  select(-seqt, -time) %>%
+  dcast(., new_seqt + cate ~ variable)
+
+df1
+res <- prcomp(as.matrix(df1[,3:ncol(df1)]))
+
+fviz_eig(res)
+fviz_pca_ind(pr_res,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = FALSE     # Avoid text overlapping
+             )
+
+fviz_pca_var(pr_res,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = FALSE     # Avoid text overlapping
+             )
+
+fviz_pca_biplot(pr_res, repel = FALSE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+
+res.var <- get_pca_var(pr_res)
+res.var$coord          # Coordinates
+res.var$contrib        # Contributions to the PCs
+res.var$cos2   
+
+res.ind <- get_pca_ind(pr_res)
+res.ind$coord          # Coordinates
+res.ind$contrib        # Contributions to the PCs
+res.ind$cos2   
+
+plot(df1$cate, res.ind$cos2)
+length(df1$cate)
+length(res$center)
+
+dim(res.ind$contrib)
+data.frame(res.ind$cos2)
+
+
+data.frame(res.ind$contrib) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  ggplot(aes(x=(freq), y= value, col=variable)) +
+  geom_line() +
+  theme(legend.position = "none")
+
+data.frame(res.var$contrib) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  filter(variable =="Dim.1") %>%
+  filter(value > 5)
+
+```
+
+
+
+```{r}
+real <- tmp %>% filter(time > tmp_key$t_min & time < tmp_key$t_max) %>%
+  mutate(new_time = time/min(time)) 
+
+others <- tmp %>% filter(time < (tmp_key$t_min - tmp_key$duration) | time > (tmp_key$t_max - tmp_key$duration)) 
+
+tmp1 <- sample(unique(others$time), 1)
+other1 <- others %>% filter(time >= tmp1 & time <= (tmp1 + tmp_key$duration)) %>%
+  mutate(cate = "random_region_1") %>%
+  mutate(new_time = time/min(time))
+  
+tmp1 <- sample(unique(others$time), 1)
+other2 <- others %>% filter(time >= tmp1 & time <= (tmp1 + tmp_key$duration))  %>%
+  mutate(cate = "random_region_2") %>%
+  mutate(new_time = time/min(time))
+
+tmp1 <- sample(unique(others$time), 1)
+other3 <- others %>% filter(time >= tmp1 & time <= (tmp1 + tmp_key$duration))  %>%
+  mutate(cate = "random_region_3") %>%
+  mutate(new_time = time/min(time))
+
+rbind(real, other1, other2, other3) %>%
+  ggplot(aes(x = time, y = FreqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  # geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  # geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  scale_color_viridis_c() +
+  facet_wrap(~cate)
+```
+
+
+
+```{r}
+
+specmaker <- function(tmp_key) {
+  # define path to audio file
+  fin = tmp_key$file_id
+  
+  # read in audio file
+  data = readWave(fin)
+  
+  # extract signal
+  snd = data@left
+  
+  # determine duration
+  dur = length(snd) / data@samp.rate
+  
+  # determine sample rate
+  fs = data@samp.rate
+  
+  # demean to remove DC offset
+  snd = snd - mean(snd)
+  
+  # plot waveform
+  # plot(snd, type = 'l', xlab = 'Samples', ylab = 'Amplitude')
+  
+  # number of points to use for the fft
+  nfft = 1024
+  # window size (in points)
+  window = 256
+  # overlap (in points)
+  overlap = 128
+  
+  # create spectrogram
+  spec = specgram(
+    x = snd,
+    n = nfft,
+    Fs = fs,
+    window = window,
+    overlap = overlap
+  )
+  # discard phase information
+  P = abs(spec$S)
+  
+  # normalize
+  P = P / max(P)
+  
+  # convert to dB
+  P = 10 * log10(P)
+  
+  # config time axis
+  t = spec$t
+  
+  time_key <-
+    data.frame(variable = paste0("X", seq(1, length(t), 1)), seqt = seq(1, length(t), 1), time = t)
+  
+  tmp <- data.frame(FreqHz = spec$f, (P)) %>%
+    melt(., id.var = "FreqHz") %>%
+    left_join(., time_key, by = "variable")
+  tmp <- cbind(tmp_key, tmp, row.names = NULL)
+  
+  return(tmp)
+}
+
+
+```
+
+
+
+

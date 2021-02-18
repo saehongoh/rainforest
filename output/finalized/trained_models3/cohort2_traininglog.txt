@@ -1,2 +1,0 @@
-timestamp	cohort	round	set	test_loss	test_acc	true_pos_rate	false_pos_rate
-10:06	cohort2	0	0	0	0	0	0

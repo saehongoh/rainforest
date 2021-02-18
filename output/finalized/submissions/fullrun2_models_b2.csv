@@ -1,0 +1,4 @@
+timestamp,cohort,round,set,test_loss,test_acc,true_pos_rate,false_pos_rate,file_id
+05:52,cohort1,5,6,0.2378,0.9636,1,0.2182,output/finalized/full_run/cohort1_r5_set6.h5
+14:28,cohort2,5,7,0.081,1,0.9,0,output/finalized/full_run/cohort2_r5_set7.h5
+12:33,cohort3,5,8,0.1783,0.9889,1,0,output/finalized/full_run/cohort3_r5_set8.h5

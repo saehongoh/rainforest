@@ -1,0 +1,123 @@
+---
+title: "post_training"
+output: html_document
+---
+
+
+```{r}
+require(dplyr)
+require(ggplot2)
+
+files1 <- list.files("results_proba", full.names = TRUE)
+files2 <- list.files("bash/results_proba", full.names = TRUE)
+
+res1 <- do.call(rbind, lapply(1:length(files1), function(x) readRDS(files1[x])))
+res2 <- do.call(rbind, lapply(1:length(files2), function(x) readRDS(files2[x])))
+
+res <- data.frame(res2) %>%
+  rename(recording_id = file_name, file_id = test_files) %>%
+  rbind(res1,.) %>%
+  mutate(class = as.numeric(as.character(class)),
+         prob0 = as.numeric(as.character(prob0)),
+         prob1 = as.numeric(as.character(prob1))) 
+
+res <- res %>%
+  mutate(parent_species = do.call(rbind, strsplit(res$species_id, "[.]"))[,1]) 
+
+test <- res %>%
+  # filter(prob1 > 0.5) %>%
+  # filter(species_id == 21) %>%
+  group_by(recording_id, file_id, species_id, parent_species) %>%
+  mutate(max_row = n(), row_seq = 1:n())  %>%
+  mutate(frame = c(rep("f1",unique(max_row)/3), rep("f2",unique(max_row)/3), rep("f3", unique(max_row)/3))) %>%
+  # mutate(frame = ifelse(row_seq <= max_row/, "f1", "f2")) %>%
+  ungroup() %>%
+  group_by(recording_id, file_id, species_id, frame, parent_species) %>%
+  mutate(frame_seq = 1:n())
+```
+
+
+```{r fig.height=10, fig.width=24}
+toplot <- sample(unique(test$recording_id),6)
+
+test %>%
+  filter(recording_id %in% toplot) %>%
+  ggplot(aes(x=frame_seq, col=as.character(frame), y=prob1)) +
+  ylim(0,1) +
+  geom_line() +
+  facet_grid(recording_id~species_id, scales="free")  + 
+  theme(legend.position="none")
+
+```
+
+```{r}
+tmp <- quantile(test[test$species_id == "0",]$prob1, seq(0, 1, 0.01), na.rm=TRUE)
+tmp[99]
+
+quantile_summary <- test %>%
+  group_by(parent_species) %>%
+  summarise(quan1 = quantile(prob1, seq(0,1,0.01))[99])
+
+test2 <- test %>%
+  # filter(class == 0) %>%
+  group_by(recording_id, file_id, parent_species, class, frame_seq) %>%
+  summarise(prob1 = max(prob1),
+            prob0 = max(prob0)) %>%
+  filter(prob1 > prob0)
+
+test3 <- test2 %>%
+  group_by(recording_id, parent_species) %>%
+  summarise(prob1 = max(prob1)) %>%
+  left_join(., quantile_summary) %>%
+  filter(prob1 >= quan1)
+
+export <- test3 %>%
+  mutate(parent_species = paste0("s", parent_species)) %>%
+  select(parent_species, recording_id, prob1) %>%
+  dcast(recording_id ~ parent_species) %>%
+  mutate_all(., function(x) ifelse(is.na(x), 0, x))
+```
+
+```{r}
+template <- read.csv("data/sample_submission.csv")
+
+export <- export[match(template$recording_id, export$recording_id),]
+
+missing_species <- colnames(template)[!(colnames(template) %in% colnames(export))]
+if(length(missing_species) > 0){
+  missing_tmp <- data.frame(matrix(0, nrow=nrow(export), ncol=length(missing_species)))
+  colnames(missing_tmp) <- missing_species
+  export <- cbind(missing_tmp, export) 
+}
+export <- export[,match(colnames(template), colnames(export))]
+
+dim(export) == dim(template)
+# write.csv(export, "submissions/results_proba1.csv", row.names = F, quote = F)
+
+```
+
+```{r}
+
+
+train_key <- list.files("output/trained_models_set5/", pattern="res", full.names=TRUE)
+train_key <- do.call(rbind, lapply(1:length(train_key), function(x) readRDS(train_key[x])))
+
+train_key$ver <- do.call(rbind, strsplit(train_key$results_name,"_"))[,4]
+
+top_res <- train_key %>%
+  filter(ver != "V1") %>%
+  group_by(species_id) %>%
+  # select(-dim_x, -dim_y) %>%
+  arrange(-test_accuracy) %>%
+  slice_max(test_accuracy, n=1) %>%
+  slice_min(test_loss, n=1) %>%
+  left_join(., durations, by = "species_id") %>%
+  mutate(multiplier = ifelse(species_id == 13.4, 2.5, multiplier))  %>%
+  mutate(multiplier = ifelse(species_id == 5.4, 3, multiplier))
+
+top_res <- top_res %>%
+  filter(!(species_id %in% c("13.4", "5.4", "20.4")))
+
+```
+
+

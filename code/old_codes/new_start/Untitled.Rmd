@@ -1,0 +1,334 @@
+---
+title: "CNN_FreqLayers"
+output: html_document
+---
+
+
+
+```{r}
+# library(tuneR, warn.conflicts = F, quietly = T) # nice functions for reading and manipulating .wav files
+# library(signal, warn.conflicts = F, quietly = T) # signal processing functions
+library(dplyr, warn.conflicts = F, quietly = T)
+library(reshape2, warn.conflicts = F, quietly = T)
+library(keras, warn.conflicts = F, quietly = T)
+# require(ggplot2)
+setwd("/Volumes/R2D2/Users/eoh/Documents/R_projects/rainforest/")
+
+source("code/fns.R")
+
+train_prepper <- function(input){
+  train <- input[[1]]
+  train_lab <- input[[2]]
+  names <- colnames(train_lab)
+
+  train_lab <- train_lab %>%
+  select(-unique_id) %>% 
+  as.data.frame() %>%
+  mutate_all(., function(x) ifelse(x == 0, 1, 0)) %>%
+  as.matrix() %>%
+  to_categorical()
+  
+  tmp <- train_lab[,,1]
+  colnames(tmp) <- names[-1]
+  list(train, tmp)
+}
+
+```
+
+
+```{r}
+
+files <- list.files("output/unmasked", pattern="posonly", full.names = TRUE)
+files <- data.frame(do.call(rbind, strsplit(files,"_|[.]"))[,2:4], files)
+colnames(files)[1:3] <- c('cat','batch','aug')
+
+test_files <- files[files$aug == "org",]
+test_data <- lapply(1:nrow(test_files), function(x) train_prepper(readRDS(test_files$files[x])))
+
+train_files <- files[files$aug != "org",] %>%
+  arrange(aug) %>%
+  group_by(aug) %>%
+  group_split(.)
+
+real_data <- train_prepper(readRDS("output/ind_training_files/unmasked_set3.RDS"))
+
+```
+
+```{r}
+
+model <- keras_model_sequential()
+
+model %>% 
+      layer_conv_2d(input_shape = c(dim(test_data[[1]])[-1]),
+                      filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+        layer_conv_2d(filters = 16, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+        layer_conv_2d(filters = 32, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+        layer_max_pooling_2d(pool_size = c(2,2)) %>%   #--------Max Pooling
+        layer_dense(units = 96, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+        layer_dropout(rate = 0.60) %>%
+        layer_dense(units = 48, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+        layer_dropout(rate = 0.50) %>%
+        layer_dense(units = 24, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+        layer_dropout(rate = 0.50) %>%
+        layer_activation(activation = 'relu') %>%
+        layer_flatten() %>%
+      layer_dense(units = dim(test_data[[2]])[2], activation = 'softmax',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+        compile(
+          loss = 'categorical_crossentropy',
+          metrics = c("accuracy"), 
+          optimizer = optimizer_adam(lr=1e-5)
+        )
+
+for(j in 1:length(train_files)){
+  tmp_key <- train_files[[j]]
+  
+  for(i in 1:nrow(tmp_key)){
+    
+    print(paste("working on ___ ", i))
+    train_data <- train_prepper(readRDS(tmp_key$files[i]))
+    model %>% fit(train_data[[1]], train_data[[2]], batch_size = 10, epochs = 50, shuffle = TRUE, 
+                   validation_split=0.15,
+                   verbose=1,
+                   callbacks=list(callback_early_stopping(patience=1, verbose=1)))
+    
+    print("evaluating on test set")
+    model %>% evaluate(test_data[[i]][[1]], test_data[[i]][[2]])
+    
+    print("evaluating on real data")
+    model %>% evaluate(real_data[[1]], real_data[[2]])
+
+  }
+    print("saving batch model")
+    file_name = paste0("output/unmasked_model/posonly_aug",j,".h5")
+    model %>% save_model_hdf5(file_name)
+}
+
+print("saving final model")
+file_name = paste0("output/unmasked_model/posonly_all.h5")
+model %>% save_model_hdf5(file_name)
+model %>% evaluate(real_data[[1]], real_data[[2]])
+
+```
+
+
+```{r}
+  eval_x <- model %>% evaluate(train_data[[1]], train_data[[2]])
+  eval_test <- model %>% evaluate(test_data[[1]], test_data[[2]])
+  
+  model %>% predict(train_data[[1]]) %>% round(., digits=3)
+  
+  model %>% predict_classes(train_data[[1]])
+  model %>% predict_proba(train_data[[1]]) %>%
+        round(., digits = 3)
+  
+  model %>% predict_classes(test_data[[1]])
+  model %>% predict_proba(test_data[[1]]) %>%
+        round(., digits = 3)
+
+  model %>% predict_classes(res[[1]])
+  model %>% predict_proba(res[[1]]) %>%
+        round(., digits = 3)
+  model %>% evaluate(real_data[[1]], real_data[[2]])
+
+```
+
+### Good model: train 95%, valid 95%
+```{r}
+# iter = 1
+# repeat{
+
+ model <- keras_model_sequential()
+
+ model %>% 
+      layer_conv_2d(input_shape = c(dim(train_x)[-1]),
+                    filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      # layer_conv_2d(filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_conv_2d(filters = 16, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_conv_2d(filters = 32, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_max_pooling_2d(pool_size = c(2,2) ) %>%   #--------Max Pooling
+      layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dropout(rate = 0.20) %>%
+      layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dropout(rate = 0.50) %>%
+      layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dropout(rate = 0.50) %>%
+      layer_activation(activation = 'relu') %>%
+      layer_flatten() %>%
+      # layer_dense(units = 16, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dense(units = 2, activation = 'sigmoid',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+      # layer_dense(units = 2, activation = 'sigmoid') %>%
+      compile(
+        loss = 'categorical_crossentropy',
+        metrics = c("accuracy"), 
+        optimizer = optimizer_adam(lr=1e-4)
+      )
+    
+    model %>%  fit(train_x, train_x_lab, batch_size = 10, epochs = 100, shuffle = TRUE, 
+                   validation_split=0.20,
+                   verbose=1,
+                   callbacks=list(callback_early_stopping(patience=5, verbose=1)))
+
+  model %>% evaluate(train_x, train_x_lab)
+  model %>% evaluate(train_y, train_y_lab)
+  
+
+#   if(iter == 5){break}
+#   iter = iter + 1
+# }
+
+
+```
+
+
+### Good model:87-88%
+```{r}
+
+model <- keras_model_sequential()
+
+model %>%
+  layer_conv_2d(input_shape = c(dim(train_x)[-1]),
+                filters = 16, kernel_size = c(2,2), activation = 'relu') %>%
+  layer_conv_2d(filters = 32, kernel_size = c(2,2), activation = 'relu') %>%
+  layer_conv_2d(filters = 64, kernel_size = c(2,2), activation = 'relu') %>%
+  layer_batch_normalization() %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.20) %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.20) %>%
+  layer_dense(units = 2, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.20) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  # layer_dense(units = 16, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dense(units = 2, activation = 'sigmoid',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  # layer_dense(units = 2, activation = 'sigmoid') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = "adam"
+  )
+
+model %>% fit(train_x, train_x_lab, batch_size = 20, epochs = 100, validation_split=0.5)
+
+model %>% evaluate(train_x, train_x_lab)
+pred <- model %>% predict_classes(train_x) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_x_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+```
+
+
+```{r}
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+```
+
+### Good model: 85
+```{r}
+
+model <- keras_model_sequential()
+
+model %>% 
+  layer_conv_2d(input_shape = c(dim(train_x)[-1]),
+                filters = 8, kernel_size = c(2,2), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_conv_2d(filters = 16, kernel_size = c(2,2), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(2,2), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  # layer_batch_normalization() %>%
+  layer_dense(units = 8, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.50) %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.50) %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.50) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  # layer_dense(units = 16, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dense(units = 2, activation = 'sigmoid',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  # layer_dense(units = 2, activation = 'sigmoid') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = optimizer_adam(lr=1e-3)
+  )
+
+summary(model)
+
+model %>% fit(train_x, train_x_lab, batch_size = 30, epochs =100, shuffle = TRUE, validation_split=0.20,
+              callbacks=list(callback_early_stopping(patience=3, verbose=1)))
+
+model %>% evaluate(train_x, train_x_lab)
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+```
+
+### Good model: train 95, valid 90-91
+```{r}
+
+model <- keras_model_sequential()
+
+model %>% 
+  layer_conv_2d(input_shape = c(dim(train_x)[-1]),
+                filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  # layer_conv_2d(filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_conv_2d(filters = 16, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  # layer_batch_normalization() %>%
+  layer_dense(units = 8, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.50) %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  layer_dropout(rate = 0.50) %>%
+  layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dropout(rate = 0.50) %>%
+  layer_activation(activation = 'relu') %>%
+  layer_flatten() %>%
+  # layer_dense(units = 16, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dense(units = 2, activation = 'sigmoid',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+  # layer_dense(units = 2, activation = 'sigmoid') %>%
+  compile(
+    loss = 'categorical_crossentropy',
+    metrics = c("accuracy"), 
+    optimizer = optimizer_adam(lr=1e-4)
+  )
+
+summary(model)
+
+model %>% fit(train_x, train_x_lab, batch_size = 10, epochs = 100, shuffle = TRUE, validation_split=0.20,
+              callbacks=list(callback_early_stopping(patience=3, verbose=1)))
+
+model %>% evaluate(train_x, train_x_lab)
+
+pred <- model %>% predict_classes(train_y) #-----Classification
+all(pred == 1)|all(pred == 0)
+res <- data.frame(pred %>% to_categorical(), train_y_lab) %>%
+  mutate(X1 = ifelse(X1 ==1, "pred_true","pred_false"),
+         X1.1 = ifelse(X1.1 == 1, "actual_true","actual_false"))
+colnames(res) <-  c("pred_true", "pred_false","actual_true","actual_false")
+table(res$pred_true, res$actual_true)
+
+length(which(pred == train_y_lab[,2]))/nrow(train_y_lab)
+
+```
+
+

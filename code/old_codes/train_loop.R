@@ -1,0 +1,171 @@
+
+library(tuneR, warn.conflicts = F, quietly = T) # nice functions for reading and manipulating .wav files
+library(signal, warn.conflicts = F, quietly = T) # signal processing functions
+library(dplyr, warn.conflicts = F, quietly = T)
+library(reshape2, warn.conflicts = F, quietly = T)
+library(keras, warn.conflicts = F, quietly = T)
+
+####
+
+keras_prepper <- function(input_data){
+  tmp <- input_data  %>%
+    mutate(cat1 = ifelse(cate == "true_positive", 1, 0),
+           cat2 = ifelse(cate == "false_positive", 1, 0)) %>%
+    group_by(unique_id) %>%
+    mutate(zts = seqt - min(seqt)) %>%
+    ungroup() %>%
+    select(unique_id, cat1, cat2, FreqHz, value, zts)
+  
+  freq_bin <- data.frame(FreqHz = unique(tmp$FreqHz), FreqBin = cut(unique(tmp$FreqHz), 4, labels = c(1,2,3,4)))
+  
+  f1 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 1) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  f2 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 2) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz)
+  
+  
+  f3 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 3) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  f4 <- tmp %>%
+    left_join(., freq_bin, by="FreqHz") %>%
+    filter(FreqBin == 4) %>%
+    dcast(unique_id + cat1 + cat2 + zts ~ FreqHz) 
+  
+  lister <- function(x){
+    list(f1 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f2 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f3 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix(),
+         f4 %>% filter(zts ==times[x])%>%select(-unique_id, -cat1, -cat2, -zts) %>% as.matrix())
+  }
+  
+  times <- unique(tmp$zts)
+  train <- lapply(1:length(times), function(x) lister(x))
+  output_x <- array(c(as.numeric(unlist(train))), dim=c(dim(train[[1]][[1]]), length(train), length(train[[1]])))
+  output_x_lab <- f1 %>% filter(zts == 0) %>% select(cat2) %>% as.matrix() %>% to_categorical() 
+  return(list(output_x, output_x_lab))
+}
+
+####
+
+iterations = 8
+
+files <- list.files("/Users/eoh/Documents/R_projects/rainforest/output/CNN_ver4", pattern="data", full.names = TRUE)
+# files <- files[5:length(files)]
+
+# export_list <- vector('list', length(files))
+
+for(i in 1:length(files)){
+  
+  data <- readRDS(files[i])
+  
+  data <- data %>%
+    group_by(unique_id, zts) %>%
+    mutate(value = value - mean(value)) %>%
+    ungroup()  %>%
+    mutate(value = scale(value, center=TRUE)) %>%
+    mutate(value = ifelse(value < 0, 0, value))
+  
+  #### Model iterations
+  iter_list <- vector('list', iterations)
+  
+  for(j in 1:iterations){
+    print(paste(unlist(strsplit(files[i],"_"))[[5]]," ____ ", j))
+    
+    data_x <- data %>%
+      filter(unique_id %in% sample(unique(data$unique_id), length(unique(data$unique_id))*0.9))
+    
+    data_y <- data %>%
+      filter(!(unique_id %in% data_x$unique_id))
+
+    tmp <- keras_prepper(data_x)
+    train_x <- tmp[[1]]
+    train_x_lab <- tmp[[2]]
+    
+    tmp <- keras_prepper(data_y)
+    train_y <- tmp[[1]]
+    train_y_lab <- tmp[[2]]
+
+    train_sum <- data_x %>%
+      select(unique_id, cate) %>%
+      distinct() %>%
+      group_by(cate) %>%
+      summarise(n=n(), .groups = 'drop')
+    
+    test_sum <- data_y %>%
+      select(unique_id, cate) %>%
+      distinct() %>%
+      group_by(cate) %>%
+      summarise(n=n(), .groups = 'drop')
+    
+    res_table <- data.frame(file_name = files[i], 
+                            species=unlist(strsplit(files[i],"_"))[[5]])
+    res_table$dim_x <- list(dim(train_x))
+    res_table$dim_y <- list(dim(train_y))
+    res_table$train_positive <- train_sum$n[2]
+    res_table$train_negatve <- train_sum$n[2]
+    res_table$test_positive <- test_sum$n[2]
+    res_table$test_negatve <- test_sum$n[2]
+    
+    rm(tmp)
+    rm(data_y)
+    rm(data_x)
+    #########
+    
+    model <- keras_model_sequential()
+    
+    model %>% 
+      layer_conv_2d(input_shape = c(dim(train_x)[-1]),
+                    filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      # layer_conv_2d(filters = 8, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_conv_2d(filters = 16, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_conv_2d(filters = 32, kernel_size = c(4,4), activation = 'relu', kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_max_pooling_2d(pool_size = c(2,2) ) %>%   #--------Max Pooling
+      layer_dense(units = 8, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+      layer_dropout(rate = 0.60) %>%
+      layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dropout(rate = 0.50) %>%
+      layer_dense(units = 4, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dropout(rate = 0.50) %>%
+      layer_activation(activation = 'relu') %>%
+      layer_flatten() %>%
+      # layer_dense(units = 16, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+      layer_dense(units = 2, activation = 'sigmoid',  kernel_regularizer = regularizer_l2(l = 0.01)) %>%
+      # layer_dense(units = 2, activation = 'sigmoid') %>%
+      compile(
+        loss = 'categorical_crossentropy',
+        metrics = c("accuracy"), 
+        optimizer = optimizer_adam(lr=1e-4)
+      )
+    
+    model %>%  fit(train_x, train_x_lab, batch_size = 10, epochs = 100, shuffle = TRUE, 
+                   validation_split=0.20,
+                   verbose=0,
+                   callbacks=list(callback_early_stopping(patience=5, verbose=1)))
+    
+    eval_x <- model %>% evaluate(train_x, train_x_lab)
+    eval_y <- model %>% evaluate(train_y, train_y_lab)
+    
+    file_name = paste0("/Users/eoh/Documents/R_projects/rainforest/models_ver2/species_", 
+                       res_table$species,"_iter_", j,".h5")
+    
+    iter_list[[j]] <- cbind(res_table, data.frame(iter = j, train_loss = eval_x[[1]], train_accuracy = eval_x[[2]],
+                                 test_loss = eval_y[[2]], test_accuracy = eval_y[[2]], results_name = file_name))
+    
+    model %>% save_model_hdf5(file_name)
+    rm(model)
+  }
+  
+  export <- do.call(rbind, iter_list)
+  saveRDS(export, paste0("/Users/eoh/Documents/R_projects/rainforest/models_ver2/species_", 
+                         res_table$species,"_res.RDS"))
+  
+}
+

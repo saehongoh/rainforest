@@ -1,0 +1,256 @@
+---
+title: "preprocessing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+### Converted files using XLC
+
+library(seewave)
+library(tuneR)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+require(purrr)
+require(matrixStats)
+# library(MASS)  # Package needed to generate correlated precictors
+# library(glmnet)  # Package to fit ridge/lasso/elastic net models
+### Converting training dataset
+
+```
+
+```{r fig.height=3, fig.width=6}
+set.seed(1234)
+train_fp <- read.csv("data/train_fp.csv") %>% mutate(cate = "false_positive") %>%
+  mutate(file_id = paste0("data/train_wav/",recording_id, ".wav"))
+train_tp <- read.csv("data/train_tp.csv") %>% mutate(cate = "true_positive") %>%
+  mutate(file_id = paste0("data/train_wav/",recording_id, ".wav"))
+
+train_key <- rbind(train_fp, train_tp) %>%
+  mutate(duration = t_max - t_min) 
+
+train_key %>%
+  ggplot(aes(duration)) +
+  geom_histogram() +
+  facet_wrap(~cate, scales = "free")
+
+train_key %>%
+  ggplot(aes(f_max)) +
+  geom_histogram() +
+  facet_wrap(~cate, scales = "free")
+```
+
+
+```{r}
+
+tmp_p <- train_tp %>%
+  select(species_id, file_id, recording_id, songtype_id) %>%
+  arrange(recording_id) %>%
+  mutate(species_id = paste0("s", species_id))
+
+tmp_p <- dcast(tmp_p, recording_id + file_id ~ species_id, value.var = 'songtype_id')
+px <- tmp_p[sample(1:nrow(tmp_p), nrow(tmp_p)/2),]
+py <- tmp_p[which(!(tmp_p$recording_id %in% px$recording_id)),]
+
+tmp_f <- train_fp %>%
+  select(species_id, file_id, recording_id, songtype_id) %>%
+  arrange(recording_id) %>%
+  mutate(species_id = paste0("s", species_id))
+
+tmp_f <- dcast(tmp_f, recording_id + file_id ~ species_id, value.var = 'songtype_id')
+fx <- tmp_f[sample(1:nrow(tmp_f), nrow(tmp_f)/2),]
+fy <- tmp_f[which(!(tmp_f$recording_id %in% fx$recording_id)),]
+
+fx <- fx %>% mutate_if(!grepl("id",colnames(.)), function(x) -x) 
+fy <- fy %>% mutate_if(!grepl("id",colnames(.)), function(x) -x) 
+
+colnames(fx)[-2][-1] <- paste0("neg_", colnames(fx)[-2][-1])
+colnames(fy)[-2][-1] <- paste0("neg_", colnames(fy)[-2][-1])
+
+px_full <- train_tp %>% filter(recording_id %in% px$recording_id)
+py_full <- train_tp %>% filter(recording_id %in% py$recording_id)
+
+fx_full <- train_fp %>% filter(recording_id %in% fx$recording_id)
+fy_full <- train_fp %>% filter(recording_id %in% fy$recording_id)
+
+saveRDS(list(px, px_full), "output/pos_x.RDS")
+saveRDS(list(py, py_full), "output/pos_y.RDS")
+saveRDS(list(fx, fx_full), "output/neg_x.RDS")
+saveRDS(list(fy, fy_full), "output/neg_y.RDS")
+```
+
+```{r}
+### time limit
+limit = 1000
+wav_files <- unique(c(px$file_id, fx$file_id))
+
+dat<- readWave(wav_files[1], units="seconds")
+sound_length <- round(length(dat@left)/ dat@samp.rate, 2)
+time <- seq(0, sound_length, sound_length/length(dat@left))
+time <- time[-length(time)]
+
+readWave2 <- function(x, sum_rows=500){
+  tmp <- readWave(x,  units="seconds")
+  tmp <- data.frame(time, value = tmp@left)
+  colMedians(matrix(tmp$value, nrow=sum_rows))
+  }
+
+dat <- do.call(rbind, lapply(1:length(wav_files), function(x) readWave2(wav_files[x], limit)))
+dat <- data.frame(file_id = wav_files, dat)
+time <- colMedians(matrix(time, nrow=limit))
+saveRDS(list(dat, time), "output/train_x.RDS")
+
+dat_x <- readRDS("output/train_x.RDS")[[1]]
+```
+
+```{r}
+wav_files <- unique(c(py$file_id, fy$file_id))
+
+dat<- readWave(wav_files[1], units="seconds")
+sound_length <- round(length(dat@left)/ dat@samp.rate, 2)
+time <- seq(0, sound_length, sound_length/length(dat@left))
+time <- time[-length(time)]
+
+readWave2 <- function(x, sum_rows=500){
+  tmp <- readWave(x,  units="seconds")
+  tmp <- data.frame(time, value = tmp@left)
+  colMedians(matrix(tmp$value, nrow=sum_rows))
+  }
+
+dat <- do.call(rbind, lapply(1:length(wav_files), function(x) readWave2(wav_files[x], limit)))
+dat <- data.frame(file_id = wav_files, dat)
+time <- colMedians(matrix(time, nrow=limit))
+saveRDS(list(dat, time), "output/train_y.RDS")
+
+dat_y <- readRDS("output/train_y.RDS")[[1]]
+```
+
+
+```{r}
+
+cols <- 3:ncol(px)
+
+res_tmp <- vector('list', length(cols))
+
+for(i in 1:length(res_tmp)){
+  num <- cols[i]
+  tmp <- merge(cbind(px[,1:2], pos = px[,num]), 
+      cbind(fx[,1:2], neg = fx[,num]), 
+      by=c('recording_id','file_id'), all=TRUE)  %>%
+  mutate_if(!grepl("id",colnames(.)), function(x) ifelse(is.na(x), 0, x)) %>%
+  mutate(score = pos + neg) %>%
+  select(recording_id, file_id, score) 
+colnames(tmp)[3] <- colnames(px)[num]
+res_tmp[[i]] <- tmp
+}
+
+x_scores <- res_tmp %>% reduce(left_join, by=c('recording_id','file_id'))
+saveRDS(x_scores, "output/scores_x.RDS")
+```
+
+```{r}
+
+cols <- 3:ncol(py)
+
+res_tmp <- vector('list', length(cols))
+
+for(i in 1:length(res_tmp)){
+  num <- cols[i]
+  tmp <- merge(cbind(py[,1:2], pos = py[,num]), 
+      cbind(fy[,1:2], neg = fy[,num]), 
+      by=c('recording_id','file_id'), all=TRUE)  %>%
+  mutate_if(!grepl("id",colnames(.)), function(x) ifelse(is.na(x), 0, x)) %>%
+  mutate(score = pos + neg) %>%
+  select(recording_id, file_id, score) 
+colnames(tmp)[3] <- colnames(py)[num]
+res_tmp[[i]] <- tmp
+}
+
+y_scores <- res_tmp %>% reduce(left_join, by=c('recording_id','file_id'))
+saveRDS(y_scores, "output/scores_y.RDS")
+```
+
+
+```{R}
+
+x <- as.matrix(dat_x[,2:ncol(dat_x)])
+y <- x_scores$s1
+
+GLMnet_model_1 <- glmnet(x, y, family="gaussian", alpha=0.5)
+
+test_x <- as.matrix(dat_y[,2:ncol(dat_y)])
+test_y <- y_scores$s1
+results <-predict(GLMnet_model_1, s=0.01, test_x, type="response")
+
+plot(test_y, results)
+cor.test(test_y, results)
+
+```
+
+
+```{r}
+
+x <- as.matrix(dat_x[dat_x$file_id %in% px$file_id,2:ncol(dat_x)]) 
+y <- px$s0
+
+GLMnet_model_1 <- glmnet(x, y, family="gaussian", alpha=0.5)
+
+test_x <- as.matrix(dat_y[,2:ncol(dat_y)])
+test_y <- y_scores$s0
+results <-predict(GLMnet_model_1, s=0.01, test_x, type="response")
+
+plot(test_y, results)
+cor.test(test_y, results)
+data.frame(test_y, results)
+
+```
+
+
+```{r}
+
+
+train_fp$cat <- "false"
+train_tp$cat <- "positive"
+train <- rbind(train_fp, train_tp) %>%
+  arrange(recording_id)
+
+train$file_id <- paste0("data/train/", train$recording_id,".wav")
+unique_files <- unique(train$file_id)
+
+
+tmp_file <- unique_files[1]
+tmp_key <- train %>% filter(file_id == tmp_file)
+tmp <- readWave(tmp_file)
+
+sound_length <- round(length(tmp@left)/ tmp@samp.rate, 2)
+time <- seq(0, sound_length, sound_length/length(tmp@left))
+time <- time[-length(time)]
+
+tmp <- data.frame(time, value = tmp@left)
+
+tmp_key[1,]$t_min
+tmp_key[1,]$t_max
+
+tmp %>%
+  filter(time >= tmp_key[1,]$t_min & time <= tmp_key[1,]$t_max)
+
+train
+train_tp
+
+```
+
+
+```{r}
+
+
+
+
+readWave2 <- function(x){
+  tmp <- readWave(x)
+  tmp@left
+}
+dat <- lapply(1:10, function(x) readWave2(wav_files[x]))
+
+do.call(rbind, dat
+
+```

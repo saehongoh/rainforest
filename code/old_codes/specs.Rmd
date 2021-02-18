@@ -1,0 +1,397 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+
+library(tuneR, warn.conflicts = F, quietly = T) # nice functions for reading and manipulating .wav files
+library(signal, warn.conflicts = F, quietly = T) # signal processing functions
+library(oce, warn.conflicts = F, quietly = T) # image plotting functions and nice color maps
+library(dplyr)
+library(ggplot2)
+require(reshape2)
+key <- readRDS("output/pos_x.RDS")[[2]] %>%
+  mutate(duration = t_max - t_min)
+
+```
+
+```{r fig.height=4, fig.width=6}
+
+key1 <- key %>% filter(species_id == 3)
+tmp_key <- key1[6,]
+tmp <- specmaker(tmp_key) %>%
+  filter(FreqHz > 50 & FreqHz < 10000)
+
+tmp %>%
+  dplyr::filter(
+    time > tmp_key$t_min - (tmp_key$duration * 4) &
+      time < tmp_key$t_max + (tmp_key$duration * 4)
+  ) %>%
+  ggplot(aes(x = time, y = FreqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  geom_hline(yintercept = c(seq(0,max(tmp$FreqHz), 1000)), col="blue") +
+  scale_color_viridis_c()
+
+```
+
+```{r fig.height=15, fig.width=4}
+
+key1 <- key %>% filter(species_id == 3)
+
+res_list <- vector('list', nrow(key1))
+
+for(i in 1:nrow(key1)){
+ tmp_key <- key1[i,]
+ tmp <- specmaker(tmp_key) %>%
+  filter(FreqHz > 50 & FreqHz < 10000)
+  res_list[[i]] <- tmp %>%
+    filter(time > tmp_key$t_min & time < tmp_key$t_max) %>%
+    mutate(new_seqt = seqt-min(seqt)) 
+  }
+
+res <- do.call(rbind, res_list)
+
+res %>%
+  filter(FreqHz > 500 & FreqHz < 3000) %>%
+  ggplot(aes(x = new_seqt, y = FreqHz, col = value)) +
+  geom_tile() + 
+  scale_color_viridis_c() +
+  facet_wrap(~recording_id, ncol=1, strip.position = "right") 
+```
+
+
+```{r fig.height=15, fig.width=2}
+res %>%
+  filter(FreqHz > 500 & FreqHz < 3000) %>%
+  group_by(recording_id, FreqHz) %>%
+  mutate(value = value + -min(value)) %>%
+  mutate(value = value/mean(value)) %>%
+  ggplot(aes(x = new_seqt, y = FreqHz, col = value)) +
+  geom_tile() + 
+  scale_color_viridis_c() +
+  facet_wrap(~recording_id, ncol=1, strip.position = "right")
+```
+  
+  
+  
+  
+```{r}
+  
+  group_by(species_id, songtype_id, t_min, f_min, t_max, f_max, cate, duration, FreqHz, seqt, time, new_seqt) %>%
+  summarise(norm = mean(value))  %>%
+  ggplot(aes(x = new_seqt, y = FreqHz, col = norm)) +
+  geom_tile() + 
+  scale_color_viridis_c() +
+  facet_wrap(~., ncol=1, strip.position = "right")
+
+```
+
+
+
+```{r}
+freq_list <- unique(res$FreqHz)
+
+pr_tmp <- res %>%
+  # filter(FreqHz == freq_list[1]) %>%
+  select(FreqHz, recording_id, new_seqt, value) %>%
+  dcast(new_seqt +recording_id ~ FreqHz) %>%
+  mutate_all(., function(x) ifelse(is.na(x), 0, x))
+
+pr_res <- prcomp(as.matrix(pr_tmp[,3:ncol(pr_tmp)]))
+
+plot(pr_res$sdev)
+
+res.ind <- get_pca_ind(pr_res)
+res.var <- get_pca_var(pr_res)
+
+data.frame(pr_tmp[,1:2], res.ind$coord) %>%
+  # melt(., id.var=c("FreqHz","new_seqt")) %>%
+  ggplot(aes(x=Dim.1, y= Dim.2, col=recording_id)) +
+  geom_point(size=0.5) +
+  scale_color_viridis_d() 
+
+dim(pr_tmp)
+data.frame(res.var$cos2) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  ggplot(aes(x=(freq), y= value, col=variable)) +
+  geom_line() +
+  theme(legend.position = "none")
+
+data.frame(res.var$contrib) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  filter(variable =="Dim.1") %>%
+  filter(value > 5)
+
+```
+
+
+```{r fig.height=8, fig.width=6}
+real <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(time > tmp_key$t_min & time < tmp_key$t_max) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "real")
+
+sample_points <- unique(others$time)
+sample_points <- sample_points[sample_points < (min(real$time) - (max(real$time) - min(real$time))) | sample_points > max(real$time)]
+sample_points <- sample_points[sample_points < max(unique(tmp$time)) -  (max(real$time) - min(real$time))]
+
+start <- unique(tmp[tmp$time == sample(sample_points, 1),]$seqt)
+range <- seq(start, start+nrow(real)-1, 1)
+
+other1 <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(seqt %in% range) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "fake_1")
+
+start <- unique(tmp[tmp$time == sample(sample_points, 1),]$seqt)
+range <- seq(start, start+nrow(real)-1, 1)
+
+other2 <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(seqt %in% range) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "fake_2")
+
+start <- unique(tmp[tmp$time == sample(sample_points, 1),]$seqt)
+range <- seq(start, start+nrow(real)-1, 1)
+
+other3 <- tmp %>%
+  dcast(., seqt + time~FreqHz)  %>% 
+  filter(seqt %in% range) %>%
+  mutate(new_seqt = seqt - min(seqt)) %>%
+  mutate(cate = "fake_3")
+
+rbind(real, other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  rename(freqHz = variable) %>%
+  mutate(freqHz = as.numeric(as.character(freqHz))) %>%
+  # filter(freqHz < 1000) %>%
+  ggplot(aes(x = new_seqt, y = freqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  # geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  # geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  scale_color_viridis_c() +
+  scale_y_continuous(breaks = seq(0, max(tmp$FreqHz), by = 1000)) +
+  facet_wrap(~cate, ncol=1)
+
+rbind(real, other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  rename(freqHz = variable) %>%
+  mutate(freqHz = as.numeric(as.character(freqHz))) %>%
+  group_by(cate, freqHz) %>%
+  mutate(value = value - median(value)) %>%
+  # filter(freqHz < 10000) %>%
+  ggplot(aes(x = new_seqt, y = freqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  # geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  # geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  scale_color_viridis_c() +
+  scale_y_continuous(breaks = seq(0, max(tmp$FreqHz), by = 1000)) +
+  facet_wrap(~cate, ncol=1)
+```
+
+
+```{r}
+periods <- (max(real$time) - min(real$time))/2
+
+df1 <- real %>% 
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  rename(freqHz = variable) %>%
+  group_by(cate, freqHz) %>%
+  mutate(value = value - median(value)) %>%
+  mutate(freqHz = as.numeric(as.character(freqHz))) %>%
+  mutate(sin = sin(time/periods*2*pi)) %>%
+  mutate(cos = cos(time/periods*2*pi))
+
+freq_list <- unique(df1$freqHz)
+res_list <- vector('list', length(freq_list))
+
+for(i in 1:length(freq_list)){
+  tmp1 <- df1 %>% filter(freqHz == freq_list[i])
+  res <- anova(lm(value ~ sin + cos + time, data=tmp1), lm(value~time, data=tmp1))$`Pr(>F)`[2]
+  res_list[[i]] <- data.frame(freqHz = freq_list[i], harm.pval = res)
+}
+
+do.call(rbind, res_list) %>%
+  mutate(harm.pval = p.adjust(harm.pval, 'none')) %>%
+  ggplot(aes(x=freqHz, y=-log10(harm.pval))) +
+  geom_point() +
+  scale_x_continuous(breaks=seq(0, 10000, 250)) + coord_flip()
+
+```
+
+
+```{r}
+background <- rbind(other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  group_by(variable) %>%
+  summarise(bg = median(value)) 
+
+df1 <- rbind(real, other1, other2, other3) %>%
+  melt(., id.var=c('seqt','time','new_seqt','cate')) %>%
+  select(-seqt, -time) %>%
+  dcast(., new_seqt + cate ~ variable)
+
+df1
+res <- prcomp(as.matrix(df1[,3:ncol(df1)]))
+
+fviz_eig(res)
+fviz_pca_ind(pr_res,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = FALSE     # Avoid text overlapping
+             )
+
+fviz_pca_var(pr_res,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = FALSE     # Avoid text overlapping
+             )
+
+fviz_pca_biplot(pr_res, repel = FALSE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+
+res.var <- get_pca_var(pr_res)
+res.var$coord          # Coordinates
+res.var$contrib        # Contributions to the PCs
+res.var$cos2   
+
+res.ind <- get_pca_ind(pr_res)
+res.ind$coord          # Coordinates
+res.ind$contrib        # Contributions to the PCs
+res.ind$cos2   
+
+plot(df1$cate, res.ind$cos2)
+length(df1$cate)
+length(res$center)
+
+dim(res.ind$contrib)
+data.frame(res.ind$cos2)
+
+
+data.frame(res.ind$contrib) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  ggplot(aes(x=(freq), y= value, col=variable)) +
+  geom_line() +
+  theme(legend.position = "none")
+
+data.frame(res.var$contrib) %>%
+  mutate(freq = as.numeric(as.character(row.names(.)))) %>%
+  melt(., id.var="freq") %>%
+  filter(variable =="Dim.1") %>%
+  filter(value > 5)
+
+```
+
+
+
+```{r}
+real <- tmp %>% filter(time > tmp_key$t_min & time < tmp_key$t_max) %>%
+  mutate(new_time = time/min(time)) 
+
+others <- tmp %>% filter(time < (tmp_key$t_min - tmp_key$duration) | time > (tmp_key$t_max - tmp_key$duration)) 
+
+tmp1 <- sample(unique(others$time), 1)
+other1 <- others %>% filter(time >= tmp1 & time <= (tmp1 + tmp_key$duration)) %>%
+  mutate(cate = "random_region_1") %>%
+  mutate(new_time = time/min(time))
+  
+tmp1 <- sample(unique(others$time), 1)
+other2 <- others %>% filter(time >= tmp1 & time <= (tmp1 + tmp_key$duration))  %>%
+  mutate(cate = "random_region_2") %>%
+  mutate(new_time = time/min(time))
+
+tmp1 <- sample(unique(others$time), 1)
+other3 <- others %>% filter(time >= tmp1 & time <= (tmp1 + tmp_key$duration))  %>%
+  mutate(cate = "random_region_3") %>%
+  mutate(new_time = time/min(time))
+
+rbind(real, other1, other2, other3) %>%
+  ggplot(aes(x = time, y = FreqHz, col = value)) +
+  geom_tile() + ylab('Frequency [Hz]') + xlab('Time [s]') +
+  # geom_vline(xintercept = tmp_key$t_min, col = "red") +
+  # geom_vline(xintercept = tmp_key$t_max, col = "red") +
+  scale_color_viridis_c() +
+  facet_wrap(~cate)
+```
+
+
+
+```{r}
+
+specmaker <- function(tmp_key) {
+  # define path to audio file
+  fin = tmp_key$file_id
+  
+  # read in audio file
+  data = readWave(fin)
+  
+  # extract signal
+  snd = data@left
+  
+  # determine duration
+  dur = length(snd) / data@samp.rate
+  
+  # determine sample rate
+  fs = data@samp.rate
+  
+  # demean to remove DC offset
+  snd = snd - mean(snd)
+  
+  # plot waveform
+  # plot(snd, type = 'l', xlab = 'Samples', ylab = 'Amplitude')
+  
+  # number of points to use for the fft
+  nfft = 1024
+  # window size (in points)
+  window = 256
+  # overlap (in points)
+  overlap = 128
+  
+  # create spectrogram
+  spec = specgram(
+    x = snd,
+    n = nfft,
+    Fs = fs,
+    window = window,
+    overlap = overlap
+  )
+  # discard phase information
+  P = abs(spec$S)
+  
+  # normalize
+  P = P / max(P)
+  
+  # convert to dB
+  P = 10 * log10(P)
+  
+  # config time axis
+  t = spec$t
+  
+  time_key <-
+    data.frame(variable = paste0("X", seq(1, length(t), 1)), seqt = seq(1, length(t), 1), time = t)
+  
+  tmp <- data.frame(FreqHz = spec$f, (P)) %>%
+    melt(., id.var = "FreqHz") %>%
+    left_join(., time_key, by = "variable")
+  tmp <- cbind(tmp_key, tmp, row.names = NULL)
+  
+  return(tmp)
+}
+
+
+```
+
+
+
+
